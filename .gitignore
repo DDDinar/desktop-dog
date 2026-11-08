@@ -1,0 +1,19 @@
+.DS_Store
+*.app/
+__pycache__/
+
+# Local art experiments from earlier versions.
+/Assets/Sprites/
+/Assets/*.png
+/Assets/*.txt
+/Assets/Photo/Profile.png
+/Assets/Photo/Walk.dogmesh
+/Assets/Photo/*.txt
+/Sources/Coat.swift
+/Sources/DogRig.swift
+/Sources/VolumeDog.swift
+/Tools/VolumeBind.json
+/Tools/bake_volume_color.py
+/Tools/build_volume_mesh.py
+/Tools/pack_volume_mesh.py
+/Tools/prepare_sprites.py
