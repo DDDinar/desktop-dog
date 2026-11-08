@@ -18,9 +18,17 @@ struct BedLife {
     private var beatEnds: TimeInterval = 0
     private var remaining: [Beat] = []
 
+    var tracksIdle: Bool { !manualSleep }
+
     init(now: TimeInterval) {
         nextActivity = now + 18
         nextBlink = now + 5
+    }
+
+    var nextUpdate: TimeInterval {
+        if !remaining.isEmpty { return beatEnds }
+        if sleeping { return .infinity }
+        return max(beatEnds, min(nextBlink, nextActivity))
     }
 
     mutating func step(now: TimeInterval, idle: TimeInterval) {

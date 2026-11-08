@@ -53,6 +53,8 @@ final class DogView: NSView {
     required init?(coder: NSCoder) { nil }
     override var isOpaque: Bool { false }
 
+    func prepareRoaming() { photoView?.prepareRoaming() }
+
     func display(_ dog: Dog, dt: TimeInterval, bedFrame: Int? = nil) {
         if let bedFrame {
             if wasSleeping || jumpHeight != 0 {

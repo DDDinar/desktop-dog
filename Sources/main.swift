@@ -20,6 +20,8 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var bounds: CGRect = .zero
     private var lastTick = 0.0
     private var lastIdleSample = 0.0
+    private var nextBedIdleCheck = -Double.infinity
+    private var displayedBedFrame: Int?
     private var pointerMotionAt = -Double.infinity
     private var pointer: CGPoint = .zero
     private var idle = 0.0
@@ -27,6 +29,7 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var chaseVisibilityUntil = 0.0
     private var hidden = false
     private let allInput = CGEventType(rawValue: UInt32.max) ?? .mouseMoved
+    private let desktopLevel = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
 
     private var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
     private var scale: CGFloat {
@@ -57,14 +60,29 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pointer = NSEvent.mouseLocation
         let t = now
         activeUntil = t + 25
-        lastTick = t
         selectScreen(underPointer: true, relocate: true)
         updateWindow()
         window.orderFrontRegardless()
         nextFolderRefresh = t + 1
         NotificationCenter.default.addObserver(self, selector: #selector(screensChanged),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
-        let timer = Timer(timeInterval: 1.0 / 60.0, target: self, selector: #selector(tick),
+        NotificationCenter.default.addObserver(self, selector: #selector(occlusionChanged),
+            name: NSWindow.didChangeOcclusionStateNotification, object: window)
+        startUpdates()
+    }
+
+    private func startUpdates() {
+        timer?.invalidate()
+        timer = nil
+        guard !hidden else { return }
+        if inBed {
+            nextBedIdleCheck = -.infinity
+            scheduleBedUpdate(at: now + 1.0 / 60.0)
+            return
+        }
+        view.prepareRoaming()
+        lastTick = now
+        let timer = Timer(timeInterval: 1.0 / 60.0, target: self, selector: #selector(tickRoaming),
                           userInfo: nil, repeats: true)
         timer.tolerance = 0.004
         RunLoop.main.add(timer, forMode: .common)
@@ -76,8 +94,8 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func applyLayer() {
-        let level: NSWindow.Level = (onTop || dog?.isChasing == true || now < chaseVisibilityUntil) ? .floating :
-            NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
+        let level: NSWindow.Level = (onTop || dog?.isChasing == true || now < chaseVisibilityUntil) ?
+            .floating : desktopLevel
         if window.level != level { window.level = level }
     }
 
@@ -119,6 +137,12 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateWindow()
     }
 
+    @objc private func occlusionChanged() {
+        if inBed && !hidden && window.occlusionState.contains(.visible) {
+            displayBed()
+        }
+    }
+
     private func refreshFolders() {
         guard !folderRefreshInProgress else { return }
         folderRefreshInProgress = true
@@ -149,7 +173,47 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.runModal()
     }
 
-    @objc private func tick() {
+    private func updateBed() {
+        timer?.invalidate()
+        timer = nil
+        guard !hidden else { return }
+        let t = now
+        if !bed.tracksIdle {
+            nextBedIdleCheck = .infinity
+        } else if t < activeUntil {
+            idle = 0
+            nextBedIdleCheck = activeUntil
+        } else if t >= nextBedIdleCheck {
+            idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: allInput)
+            // New input can only push the sleep deadline later. Check for
+            // input every half second once the dog has fallen asleep.
+            nextBedIdleCheck = t + (idle >= Dog.restThreshold ? 0.5 : Dog.restThreshold - idle)
+        }
+        bed.step(now: t, idle: idle)
+        displayBed()
+
+        scheduleBedUpdate(at: min(bed.nextUpdate, nextBedIdleCheck))
+    }
+
+    private func scheduleBedUpdate(at deadline: TimeInterval) {
+        guard deadline.isFinite else { return }
+        let delay = max(0.001, deadline - now)
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            self?.updateBed()
+        }
+        timer.tolerance = min(delay * 0.1, 0.008)
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    private func displayBed() {
+        guard displayedBedFrame != bed.frame,
+              !window.isVisible || window.occlusionState.contains(.visible) else { return }
+        displayedBedFrame = bed.frame
+        view.display(dog, dt: 0, bedFrame: bed.frame)
+    }
+
+    @objc private func tickRoaming() {
         let t = now
         let dt = min(t - lastTick, 0.08)
         lastTick = t
@@ -163,23 +227,19 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
             idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: allInput)
             lastIdleSample = t
         }
-        let idleTime = t < activeUntil ? 0 : idle
-        if inBed {
-            bed.step(now: t, idle: idleTime)
-        } else {
-            if t >= nextFolderRefresh { refreshFolders() }
-            dog.step(now: t, dt: dt, idle: idleTime, pointer: p,
-                     pointerOnScreen: screenFrame.contains(p), pointerMoving: t - pointerMotionAt < 0.45,
-                     allowChase: allowChase, bounds: bounds, folders: folders, scale: scale)
-        }
-        updateWindow(dt: dt)
+        if t >= nextFolderRefresh { refreshFolders() }
+        let sizeScale = scale
+        dog.step(now: t, dt: dt, idle: t < activeUntil ? 0 : idle, pointer: p,
+                 pointerOnScreen: screenFrame.contains(p), pointerMoving: t - pointerMotionAt < 0.45,
+                 allowChase: allowChase, bounds: bounds, folders: folders, scale: sizeScale)
+        updateWindow(dt: dt, scale: sizeScale)
     }
 
-    private func updateWindow(dt: TimeInterval = 1.0 / 60.0) {
+    private func updateWindow(dt: TimeInterval = 1.0 / 60.0, scale sizeScale: CGFloat? = nil) {
         guard let dog else { return }
         if dog.isChasing { chaseVisibilityUntil = now + 2.4 }
         applyLayer()
-        let s = scale
+        let s = sizeScale ?? scale
         let size = CGSize(width: DogWindow.size.width * s, height: DogWindow.size.height * s)
         if window.frame.size != size { window.setContentSize(size) }
         let origin = DogWindow.origin(at: dog.position, scale: s)
@@ -187,8 +247,10 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if hypot(previous.x - origin.x, previous.y - origin.y) >= 0.2 {
             window.setFrameOrigin(origin)
         }
-        if !window.isVisible || window.occlusionState.contains(.visible) {
-            view.display(dog, dt: dt, bedFrame: inBed ? bed.frame : nil)
+        if inBed {
+            displayBed()
+        } else if !window.isVisible || window.occlusionState.contains(.visible) {
+            view.display(dog, dt: dt)
         }
     }
 
@@ -243,9 +305,11 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func reveal() {
+        let wasHidden = hidden
         hidden = false
         status.button?.alphaValue = 1
         window.orderFrontRegardless()
+        if wasHidden { startUpdates() }
     }
 
     @objc private func toggleVisible() {
@@ -253,6 +317,8 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
             reveal()
         } else {
             hidden = true
+            timer?.invalidate()
+            timer = nil
             window.orderOut(nil)
             status.button?.alphaValue = 0.55
         }
@@ -268,7 +334,12 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
         reveal()
         let t = now
         activeUntil = t + 20
-        if inBed { bed.perform(.wag, now: t) } else { dog.pet(now: t) }
+        if inBed {
+            bed.perform(.wag, now: t)
+            updateBed()
+        } else {
+            dog.pet(now: t)
+        }
     }
 
     @objc private func sniff() {
@@ -276,6 +347,7 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
         activeUntil = now + 45
         if inBed {
             bed.perform(.sniff, now: now)
+            updateBed()
             return
         }
         folderRequest = true
@@ -291,13 +363,23 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func restDog() {
         reveal()
-        if inBed { bed.perform(.sleep, now: now) } else { dog.rest(now: now) }
+        if inBed {
+            bed.perform(.sleep, now: now)
+            updateBed()
+        } else {
+            dog.rest(now: now)
+        }
     }
 
     @objc private func wakeDog() {
         reveal()
         activeUntil = now + 20
-        if inBed { bed.perform(.wake, now: now) } else { dog.wake(now: now) }
+        if inBed {
+            bed.perform(.wake, now: now)
+            updateBed()
+        } else {
+            dog.wake(now: now)
+        }
     }
 
     @objc private func toggleBed() {
@@ -305,11 +387,13 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
         prefs.set(inBed, forKey: "roaming")
         dog = Dog(position: dog.position, now: t)
         bed = BedLife(now: t)
+        displayedBedFrame = nil
         folderRequest = false
         chaseVisibilityUntil = 0
         activeUntil = t + 25
         reveal()
         updateWindow()
+        startUpdates()
     }
 
     @objc private func toggleTop() {

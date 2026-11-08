@@ -43,7 +43,8 @@ private struct PhotoTexture {
 final class PhotoSurface: MTKView, MTKViewDelegate {
     private let queue: MTLCommandQueue
     private let pipeline: MTLRenderPipelineState
-    private let atlases: [String: PhotoTexture]
+    private let atlasURLs: [String: URL]
+    private var atlases: [String: PhotoTexture] = [:]
     private var animation: PhotoAppearance
     private var current: PhotoFrame?
 
@@ -51,14 +52,11 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
         guard let device = MTLCreateSystemDefaultDevice(),
               let queue = device.makeCommandQueue(),
               let appearance = PhotoAppearance(assets: assets) else { return nil }
-        var atlases: [String: PhotoTexture] = [:]
         let motionAtlases = appearance.motionAtlases
-        for name in motionAtlases.union(["Portraits", "Rest"]) {
+        let atlasURLs = Dictionary(uniqueKeysWithValues: motionAtlases.union(["Portraits", "Rest"]).map { name in
             let folder = motionAtlases.contains(name) ? assets.appendingPathComponent("Motion") : assets
-            guard let texture = PhotoTexture(device: device, queue: queue,
-                    url: folder.appendingPathComponent(name).appendingPathExtension("png")) else { return nil }
-            atlases[name] = texture
-        }
+            return (name, folder.appendingPathComponent(name).appendingPathExtension("png"))
+        })
         do {
             let library = try device.makeLibrary(source: shader, options: nil)
             let descriptor = MTLRenderPipelineDescriptor()
@@ -67,7 +65,7 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
             descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
             let pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
             return PhotoSurface(frame: frame, device: device, queue: queue,
-                                pipeline: pipeline, atlases: atlases, appearance: appearance)
+                                pipeline: pipeline, atlasURLs: atlasURLs, appearance: appearance)
         } catch {
             NSLog("Could not initialize dog rendering: %@", error.localizedDescription)
             return nil
@@ -75,11 +73,11 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
     }
 
     private init(frame: CGRect, device: MTLDevice, queue: MTLCommandQueue,
-                 pipeline: MTLRenderPipelineState, atlases: [String: PhotoTexture],
+                 pipeline: MTLRenderPipelineState, atlasURLs: [String: URL],
                  appearance: PhotoAppearance) {
         self.queue = queue
         self.pipeline = pipeline
-        self.atlases = atlases
+        self.atlasURLs = atlasURLs
         animation = appearance
         super.init(frame: frame, device: device)
         colorPixelFormat = .bgra8Unorm
@@ -102,8 +100,26 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
         display(animation.bedFrame(index))
     }
 
+    func prepareRoaming() {
+        // Keep the walking textures out of memory at a normal launch, and
+        // load them before the first walk so the animation doesn't stall.
+        let bedAtlas = animation.bedFrame(0).atlas
+        for name in atlasURLs.keys where name != bedAtlas {
+            _ = loadAtlas(name)
+        }
+    }
+
+    @discardableResult
+    private func loadAtlas(_ name: String) -> Bool {
+        if atlases[name] != nil { return true }
+        guard let device, let url = atlasURLs[name],
+              let texture = PhotoTexture(device: device, queue: queue, url: url) else { return false }
+        atlases[name] = texture
+        return true
+    }
+
     private func display(_ next: PhotoFrame) {
-        if next != current {
+        if next != current, loadAtlas(next.atlas) {
             current = next
             needsDisplay = true
         }
