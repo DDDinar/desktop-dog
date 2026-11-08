@@ -10,6 +10,7 @@ final class DogWindow: NSWindow {
     init() {
         super.init(contentRect: CGRect(origin: .zero, size: Self.size),
                    styleMask: .borderless, backing: .buffered, defer: false)
+        level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
         backgroundColor = .clear
         isOpaque = false
         hasShadow = false

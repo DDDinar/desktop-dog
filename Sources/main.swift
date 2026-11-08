@@ -26,17 +26,14 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var pointer: CGPoint = .zero
     private var idle = 0.0
     private var activeUntil = 0.0
-    private var chaseVisibilityUntil = 0.0
     private var hidden = false
     private let allInput = CGEventType(rawValue: UInt32.max) ?? .mouseMoved
-    private let desktopLevel = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
 
     private var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
     private var scale: CGFloat {
         let value = prefs.double(forKey: "size")
         return [0.75, 1, 1.30].contains(value) ? CGFloat(value) : 1
     }
-    private var onTop: Bool { prefs.bool(forKey: "onTop") }
     private var allowChase: Bool { prefs.object(forKey: "allowChase") as? Bool ?? true }
     private var inBed: Bool { !prefs.bool(forKey: "roaming") }
 
@@ -45,7 +42,6 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
         view = DogView(frame: CGRect(origin: .zero, size: DogWindow.size))
         view.autoresizingMask = [.width, .height]
         window.contentView = view
-        applyLayer()
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = status.button {
             button.image = NSImage(systemSymbolName: "pawprint.fill",
@@ -91,12 +87,6 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_ note: Notification) {
         timer?.invalidate()
-    }
-
-    private func applyLayer() {
-        let level: NSWindow.Level = (onTop || dog?.isChasing == true || now < chaseVisibilityUntil) ?
-            .floating : desktopLevel
-        if window.level != level { window.level = level }
     }
 
     private func id(of screen: NSScreen) -> NSNumber? {
@@ -237,8 +227,6 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updateWindow(dt: TimeInterval = 1.0 / 60.0, scale sizeScale: CGFloat? = nil) {
         guard let dog else { return }
-        if dog.isChasing { chaseVisibilityUntil = now + 2.4 }
-        applyLayer()
         let s = sizeScale ?? scale
         let size = CGSize(width: DogWindow.size.width * s, height: DogWindow.size.height * s)
         if window.frame.size != size { window.setContentSize(size) }
@@ -275,7 +263,6 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
         menu.addItem(item("Режим лежанки", #selector(toggleBed), checked: inBed))
-        menu.addItem(item("Поверх окон", #selector(toggleTop), checked: onTop))
         if !inBed {
             menu.addItem(item("Иногда бегать за курсором", #selector(toggleChase), checked: allowChase))
         }
@@ -389,17 +376,10 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
         bed = BedLife(now: t)
         displayedBedFrame = nil
         folderRequest = false
-        chaseVisibilityUntil = 0
         activeUntil = t + 25
         reveal()
         updateWindow()
         startUpdates()
-    }
-
-    @objc private func toggleTop() {
-        prefs.set(!onTop, forKey: "onTop")
-        applyLayer()
-        if !hidden { window.orderFrontRegardless() }
     }
 
     @objc private func toggleChase() {
