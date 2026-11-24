@@ -45,6 +45,7 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
     private let pipeline: MTLRenderPipelineState
     private let atlasURLs: [String: URL]
     private var atlases: [String: PhotoTexture] = [:]
+    private let flow: MTLTexture
     private var animation: PhotoAppearance
     private var current: PhotoFrame?
 
@@ -57,6 +58,16 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
             let folder = motionAtlases.contains(name) ? assets.appendingPathComponent("Motion") : assets
             return (name, folder.appendingPathComponent(name).appendingPathExtension("png"))
         })
+        let rowBytes = 8 * 108 * 4
+        guard let bytes = try? Data(contentsOf: assets.appendingPathComponent("Motion/Flow.rgba")),
+              !bytes.isEmpty, bytes.count % (rowBytes * 100) == 0 else { return nil }
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm,
+            width: 8 * 108, height: bytes.count / rowBytes, mipmapped: false)
+        guard let flow = device.makeTexture(descriptor: desc) else { return nil }
+        bytes.withUnsafeBytes { raw in
+            flow.replace(region: MTLRegionMake2D(0, 0, flow.width, flow.height), mipmapLevel: 0,
+                         withBytes: raw.baseAddress!, bytesPerRow: rowBytes)
+        }
         do {
             let library = try device.makeLibrary(source: shader, options: nil)
             let descriptor = MTLRenderPipelineDescriptor()
@@ -65,7 +76,7 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
             descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
             let pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
             return PhotoSurface(frame: frame, device: device, queue: queue,
-                                pipeline: pipeline, atlasURLs: atlasURLs, appearance: appearance)
+                                pipeline: pipeline, atlasURLs: atlasURLs, appearance: appearance, flow: flow)
         } catch {
             NSLog("Could not initialize dog rendering: %@", error.localizedDescription)
             return nil
@@ -74,7 +85,8 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
 
     private init(frame: CGRect, device: MTLDevice, queue: MTLCommandQueue,
                  pipeline: MTLRenderPipelineState, atlasURLs: [String: URL],
-                 appearance: PhotoAppearance) {
+                 appearance: PhotoAppearance, flow: MTLTexture) {
+        self.flow = flow
         self.queue = queue
         self.pipeline = pipeline
         self.atlasURLs = atlasURLs
@@ -96,14 +108,14 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
         display(animation.frame(for: dog, dt: dt, windowScale: scale))
     }
 
-    func updateBed(_ index: Int) {
-        display(animation.bedFrame(index))
+    func updateBed(_ sample: BedLife.Sample) {
+        display(animation.bedFrame(sample))
     }
 
     func prepareRoaming() {
         // Keep the walking textures out of memory at a normal launch, and
         // load them before the first walk so the animation doesn't stall.
-        let bedAtlas = animation.bedFrame(0).atlas
+        let bedAtlas = animation.bedFrame(.init(from: 0, to: 0, phase: 4)).atlas
         for name in atlasURLs.keys where name != bedAtlas {
             _ = loadAtlas(name)
         }
@@ -140,17 +152,29 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
     func encode(_ pass: MTLRenderPassDescriptor, into command: MTLCommandBuffer) -> Bool {
         guard let frame = current, let atlas = atlases[frame.atlas],
               let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return false }
-        let b = frame.bounds
+        func localBounds(_ bounds: SIMD4<Float>, _ pivot: SIMD2<Float>) -> SIMD4<Float> {
+            (bounds - SIMD4(pivot.x, pivot.y, pivot.x, pivot.y)) * frame.scale
+        }
+        var b = localBounds(frame.bounds, frame.pivot)
+        if frame.fraction > 0 {
+            let other = localBounds(frame.targetBounds, frame.targetPivot)
+            b = SIMD4(min(b.x, other.x)-2, min(b.y, other.y)-2,
+                      max(b.z, other.z)+2, max(b.w, other.w)+2)
+        }
         let half = SIMD2(Float(DogWindow.size.width / 2), Float(DogWindow.size.height / 2))
         let floor = Float(DogWindow.groundMargin) - half.y + frame.lift
         let corners = [SIMD2(b.x, b.y), SIMD2(b.z, b.y), SIMD2(b.x, b.w), SIMD2(b.z, b.w)]
-        let vertices = corners.map { source -> SIMD4<Float> in
-            let uv = source / atlas.size
-            let local = (source - frame.pivot) * frame.scale
-            return SIMD4(local.x * frame.mirror / half.x, (floor - local.y) / half.y, uv.x, uv.y)
+        let vertices = corners.map { local in
+            SIMD4(local.x * frame.mirror / half.x, (floor - local.y) / half.y, local.x, local.y)
         }
+        let uniforms: [SIMD4<Float>] = [
+            SIMD4(frame.pivot.x, frame.pivot.y, frame.targetPivot.x, frame.targetPivot.y),
+            SIMD4(frame.scale, frame.fraction, Float(frame.tile), frame.reversed ? 1 : 0),
+            frame.bounds, frame.targetBounds]
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentTexture(atlas.texture, index: 0)
+        encoder.setFragmentTexture(flow, index: 1)
+        uniforms.withUnsafeBytes { encoder.setFragmentBytes($0.baseAddress!, length: $0.count, index: 0) }
         vertices.withUnsafeBytes {
             encoder.setVertexBytes($0.baseAddress!, length: $0.count, index: 0)
         }
@@ -167,10 +191,41 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
         float4 corner = corners[id];
         return {float4(corner.xy, 0, 1), corner.zw};
     }
-    fragment float4 photo_fragment(PhotoPixel p [[stage_in]], texture2d<float> atlas [[texture(0)]]) {
-        constexpr sampler linear(coord::normalized, address::clamp_to_edge,
-                                 filter::linear, mip_filter::linear);
-        return atlas.sample(linear, p.uv);
+    // Optical flow is measured on registered poses at one pixel per desktop point.
+    float2 displacement(texture2d<float> flow, float2 local, int tile, bool reverse) {
+        constexpr sampler linear(coord::pixel, address::clamp_to_edge, filter::linear);
+        float2 cell = clamp((local + float2(108,172))*0.5, float2(0.5), float2(107.5,99.5));
+        float4 field = flow.sample(linear, float2((tile%8)*108,(tile/8)*100) + cell);
+        return ((reverse ? field.zw : field.xy)*255.0 - 128.0)*0.5;
+    }
+    float4 photo(texture2d<float> atlas, float2 pixel, float4 bounds, float lod) {
+        constexpr sampler linear(coord::normalized, address::clamp_to_edge, filter::linear, mip_filter::linear);
+        if (any(pixel < bounds.xy) || any(pixel >= bounds.zw)) return 0;
+        return atlas.sample(linear, pixel/float2(atlas.get_width(),atlas.get_height()), level(lod));
+    }
+    fragment float4 photo_fragment(PhotoPixel p [[stage_in]], texture2d<float> atlas [[texture(0)]],
+                                   texture2d<float> flow [[texture(1)]], constant float4 *u [[buffer(0)]]) {
+        float scale = u[1].x, t = u[1].y;
+        float lod = log2(max(length(dfdx(p.uv)),length(dfdy(p.uv)))/scale);
+        if (t == 0) return photo(atlas,p.uv/scale+u[0].xy,u[2],lod);
+        int tile = int(u[1].z);
+        bool reverse = u[1].w > 0;
+        float2 a = p.uv, b = p.uv;
+        for (int i=0; i<3; ++i) {
+            a = p.uv - t*displacement(flow,a,tile,reverse);
+            b = p.uv - (1-t)*displacement(flow,b,tile,!reverse);
+        }
+        float4 first = photo(atlas,a/scale+u[0].xy,u[2],lod);
+        float4 second = photo(atlas,b/scale+u[0].zw,u[3],lod);
+        // Prefer the closer exposure where limbs uncover a different background.
+        float2 forward = displacement(flow,a,tile,reverse);
+        float2 backward = displacement(flow,b,tile,!reverse);
+        float errorA = length(forward + displacement(flow,a+forward,tile,!reverse));
+        float errorB = length(backward + displacement(flow,b+backward,tile,reverse));
+        float weight = mix(t, smoothstep(0.2,0.8,t),abs(first.a-second.a));
+        float wa = (1-weight)/(1+t*errorA);
+        float wb = weight/(1+(1-t)*errorB);
+        return (wa*first+wb*second)/(wa+wb);
     }
     """
 }

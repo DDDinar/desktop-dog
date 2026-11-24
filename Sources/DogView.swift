@@ -56,7 +56,7 @@ final class DogView: NSView {
 
     func prepareRoaming() { photoView?.prepareRoaming() }
 
-    func display(_ dog: Dog, dt: TimeInterval, bedFrame: Int? = nil) {
+    func display(_ dog: Dog, dt: TimeInterval, bedFrame: BedLife.Sample? = nil) {
         if let bedFrame {
             if wasSleeping || jumpHeight != 0 {
                 wasSleeping = false

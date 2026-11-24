@@ -2,14 +2,25 @@ import Foundation
 
 /// A quiet, stationary routine. The bed shares one anchor in every photograph.
 struct BedLife {
-    enum Action { case wake, sleep, wag, sniff }
+    struct Sample: Equatable {
+        let from: Int
+        let to: Int
+        let phase: Int
+    }
+    private var previous = 0
+    private var transitionStart = 0.0
+    private var transitionDuration = 0.0
+    private var phase = 4
+    var sample: Sample { Sample(from: previous, to: frame, phase: phase) }
+
+    enum Action { case wake, sleep, wag, sniff, yawn, listen }
 
     private struct Beat {
         let frame: Int
         let seconds: TimeInterval
     }
 
-    private static let parent = [0, 0, 0, 2, 0, 4, 5, 6, 7, 7, 7, 10]
+    private static let parent = [0, 0, 0, 2, 0, 4, 5, 6, 7, 7, 7, 10, 0, 12, 0, 14]
     private(set) var frame = 0
     private(set) var sleeping = false
     private var manualSleep = false
@@ -26,6 +37,9 @@ struct BedLife {
     }
 
     var nextUpdate: TimeInterval {
+        if phase < 4 {
+            return transitionStart + Double(phase + 1) * transitionDuration / 4
+        }
         if !remaining.isEmpty { return beatEnds }
         if sleeping { return .infinity }
         return max(beatEnds, min(nextBlink, nextActivity))
@@ -38,9 +52,13 @@ struct BedLife {
             perform(.wake, now: now)
         }
         while !remaining.isEmpty && now >= beatEnds { advance(at: beatEnds) }
+        if phase < 4 {
+            phase = min(4, max(0, Int(floor((now - transitionStart) * 4 / transitionDuration + 0.00001))))
+        }
         guard !sleeping, now >= beatEnds else { return }
         if now >= nextActivity {
-            perform(Bool.random() ? .wag : .sniff, now: now)
+            let actions: [Action] = [.wag, .sniff, .listen, .yawn]
+            perform(actions.randomElement()!, now: now)
         } else if now >= nextBlink {
             begin([Beat(frame: 1, seconds: 0.18), Beat(frame: 0, seconds: 0)], now: now)
             nextBlink = now + Double.random(in: 5...13)
@@ -59,6 +77,11 @@ struct BedLife {
             appendRoute(from: frame, to: 0, seconds: 0.20)
         case .sleep:
             appendRoute(from: frame, to: 3, seconds: 0.32)
+        case .yawn, .listen:
+            let pose = action == .yawn ? 13 : 15
+            appendRoute(from: frame, to: pose, seconds: 0.22)
+            beats.append(Beat(frame: pose, seconds: action == .yawn ? 0.42 : 0.85))
+            appendRoute(from: pose, to: 0, seconds: 0.22)
         case .wag, .sniff:
             appendRoute(from: frame, to: 7, seconds: 0.16)
             beats.append(Beat(frame: 7, seconds: 0.38))
@@ -87,7 +110,11 @@ struct BedLife {
     private mutating func advance(at time: TimeInterval) {
         guard !remaining.isEmpty else { return }
         let beat = remaining.removeFirst()
+        previous = frame
         frame = beat.frame
+        transitionStart = time
+        transitionDuration = min(0.16, beat.seconds > 0 ? beat.seconds : 0.10)
+        phase = previous == frame ? 4 : 0
         beatEnds = time + beat.seconds
     }
 

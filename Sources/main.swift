@@ -21,7 +21,7 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastTick = 0.0
     private var lastIdleSample = 0.0
     private var nextBedIdleCheck = -Double.infinity
-    private var displayedBedFrame: Int?
+    private var displayedBedFrame: BedLife.Sample?
     private var pointerMotionAt = -Double.infinity
     private var pointer: CGPoint = .zero
     private var idle = 0.0
@@ -197,10 +197,10 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func displayBed() {
-        guard displayedBedFrame != bed.frame,
+        guard displayedBedFrame != bed.sample,
               !window.isVisible || window.occlusionState.contains(.visible) else { return }
-        displayedBedFrame = bed.frame
-        view.display(dog, dt: 0, bedFrame: bed.frame)
+        displayedBedFrame = bed.sample
+        view.display(dog, dt: 0, bedFrame: bed.sample)
     }
 
     @objc private func tickRoaming() {
@@ -249,6 +249,8 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(item(hidden ? "Показать собаку" : "Спрятать собаку", #selector(toggleVisible)))
         menu.addItem(item("Погладить", #selector(pet)))
         if inBed {
+            menu.addItem(item("Позевать", #selector(yawn)))
+            menu.addItem(item("Прислушаться", #selector(listen)))
             menu.addItem(item("Понюхать лежанку", #selector(sniff)))
             menu.addItem(bed.sleeping ? item("Разбудить", #selector(wakeDog)) :
                                         item("Уложить спать", #selector(restDog)))
@@ -327,6 +329,16 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             dog.pet(now: t)
         }
+    }
+
+    @objc private func listen() { performBedGesture(.listen) }
+    @objc private func yawn() { performBedGesture(.yawn) }
+
+    private func performBedGesture(_ action: BedLife.Action) {
+        reveal()
+        activeUntil = now + 20
+        bed.perform(action, now: now)
+        updateBed()
     }
 
     @objc private func sniff() {

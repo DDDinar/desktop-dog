@@ -39,6 +39,11 @@ for name, (atlas, rows, first_row, scale, pivot_x) in clips.items():
                   min(right, x + r + 6), min(bottom, y + b + 6)]
         horizontal = pivot_x if isinstance(pivot_x, int) else pivot_x[index]
         frames.append(bounds + [x + horizontal, y + b - 2])
+    if name == "bed":
+        # pack_bed.swift adds four registered 362px cells under the original sheet.
+        for i in range(4):
+            x, y = i * 362, 3 * 362
+            frames.append([x, y, x + 362, y + 330, x + 182, y + 320])
     registered[name] = dict(atlas=atlas, scale=scale, frames=frames)
 
 with (motion / "Atlas.json").open("w", encoding="utf-8") as out:
