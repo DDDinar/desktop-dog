@@ -45,6 +45,8 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
     private let pipeline: MTLRenderPipelineState
     private let atlasURLs: [String: URL]
     private var atlases: [String: PhotoTexture] = [:]
+    private let turnPipeline: MTLRenderPipelineState
+    private var currentTurn: PhotoAppearance.Turn?
     private let flow: MTLTexture
     private var animation: PhotoAppearance
     private var current: PhotoFrame?
@@ -58,16 +60,7 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
             let folder = motionAtlases.contains(name) ? assets.appendingPathComponent("Motion") : assets
             return (name, folder.appendingPathComponent(name).appendingPathExtension("png"))
         })
-        let rowBytes = 8 * 108 * 4
-        guard let bytes = try? Data(contentsOf: assets.appendingPathComponent("Motion/Flow.rgba")),
-              !bytes.isEmpty, bytes.count % (rowBytes * 100) == 0 else { return nil }
-        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm,
-            width: 8 * 108, height: bytes.count / rowBytes, mipmapped: false)
-        guard let flow = device.makeTexture(descriptor: desc) else { return nil }
-        bytes.withUnsafeBytes { raw in
-            flow.replace(region: MTLRegionMake2D(0, 0, flow.width, flow.height), mipmapLevel: 0,
-                         withBytes: raw.baseAddress!, bytesPerRow: rowBytes)
-        }
+        guard let flow = loadFlow(assets.appendingPathComponent("Motion/Flow.rgba"), device: device) else { return nil }
         do {
             let library = try device.makeLibrary(source: shader, options: nil)
             let descriptor = MTLRenderPipelineDescriptor()
@@ -75,17 +68,35 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
             descriptor.fragmentFunction = library.makeFunction(name: "photo_fragment")
             descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
             let pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+            descriptor.fragmentFunction = library.makeFunction(name: "turn_fragment")
+            let turns = try device.makeRenderPipelineState(descriptor: descriptor)
             return PhotoSurface(frame: frame, device: device, queue: queue,
-                                pipeline: pipeline, atlasURLs: atlasURLs, appearance: appearance, flow: flow)
+                                pipeline: pipeline, atlasURLs: atlasURLs, appearance: appearance, flow: flow,
+                                turns: turns)
         } catch {
             NSLog("Could not initialize dog rendering: %@", error.localizedDescription)
             return nil
         }
     }
 
+    private static func loadFlow(_ url: URL, device: MTLDevice, width: Int = 864, blockHeight: Int = 100) -> MTLTexture? {
+        let rowBytes = width * 4
+        guard let bytes = try? Data(contentsOf: url),
+              !bytes.isEmpty, bytes.count % (rowBytes * blockHeight) == 0 else { return nil }
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm,
+            width: width, height: bytes.count / rowBytes, mipmapped: false)
+        guard let flow = device.makeTexture(descriptor: desc) else { return nil }
+        bytes.withUnsafeBytes { raw in
+            flow.replace(region: MTLRegionMake2D(0, 0, flow.width, flow.height), mipmapLevel: 0,
+                         withBytes: raw.baseAddress!, bytesPerRow: rowBytes)
+        }
+        return flow
+    }
+
     private init(frame: CGRect, device: MTLDevice, queue: MTLCommandQueue,
                  pipeline: MTLRenderPipelineState, atlasURLs: [String: URL],
-                 appearance: PhotoAppearance, flow: MTLTexture) {
+                 appearance: PhotoAppearance, flow: MTLTexture, turns: MTLRenderPipelineState) {
+        self.turnPipeline = turns
         self.flow = flow
         self.queue = queue
         self.pipeline = pipeline
@@ -105,7 +116,8 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
     override var isOpaque: Bool { false }
 
     func update(_ dog: Dog, dt: TimeInterval, scale: CGFloat) {
-        display(animation.frame(for: dog, dt: dt, windowScale: scale))
+        let frame = animation.frame(for: dog, dt: dt, windowScale: scale)
+        display(frame, turn: animation.turn)
     }
 
     func updateBed(_ sample: BedLife.Sample) {
@@ -130,8 +142,11 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
         return true
     }
 
-    private func display(_ next: PhotoFrame) {
-        if next != current, loadAtlas(next.atlas) {
+    private func display(_ next: PhotoFrame, turn: PhotoAppearance.Turn? = nil) {
+        if next != current || turn != currentTurn {
+            guard loadAtlas(next.atlas) else { return }
+            if let turn, !loadAtlas(turn.target.atlas) { return }
+            currentTurn = turn
             current = next
             needsDisplay = true
         }
@@ -152,26 +167,48 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
     func encode(_ pass: MTLRenderPassDescriptor, into command: MTLCommandBuffer) -> Bool {
         guard let frame = current, let atlas = atlases[frame.atlas],
               let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return false }
-        func localBounds(_ bounds: SIMD4<Float>, _ pivot: SIMD2<Float>) -> SIMD4<Float> {
-            (bounds - SIMD4(pivot.x, pivot.y, pivot.x, pivot.y)) * frame.scale
+        func bounds(_ pose: PhotoFrame, interpolated: Bool = false) -> SIMD4<Float> {
+            func rect(_ pixels: SIMD4<Float>, _ pivot: SIMD2<Float>) -> SIMD4<Float> {
+                let r = (pixels - SIMD4(pivot.x,pivot.y,pivot.x,pivot.y)) * pose.scale
+                return pose.mirror > 0 ? r : SIMD4(-r.z,r.y,-r.x,r.w)
+            }
+            var r = rect(pose.bounds,pose.pivot)
+            if pose.fraction > 0 {
+                let other = rect(pose.targetBounds, pose.targetPivot)
+                r = interpolated ? r + (other-r)*pose.fraction : union(r,other)
+            }
+            return r
         }
-        var b = localBounds(frame.bounds, frame.pivot)
-        if frame.fraction > 0 {
-            let other = localBounds(frame.targetBounds, frame.targetPivot)
-            b = SIMD4(min(b.x, other.x)-2, min(b.y, other.y)-2,
-                      max(b.z, other.z)+2, max(b.w, other.w)+2)
+        func union(_ a: SIMD4<Float>, _ b: SIMD4<Float>) -> SIMD4<Float> {
+            SIMD4(min(a.x,b.x),min(a.y,b.y),max(a.z,b.z),max(a.w,b.w))
+        }
+        func parameters(_ pose: PhotoFrame) -> [SIMD4<Float>] {
+            [SIMD4(pose.pivot.x, pose.pivot.y, pose.targetPivot.x, pose.targetPivot.y),
+             SIMD4(pose.scale,pose.fraction,Float(pose.tile),pose.reversed ? 1 : 0),
+             pose.bounds,pose.targetBounds]
+        }
+        var b = bounds(frame)
+        var uniforms = parameters(frame)
+        if let turn = currentTurn, let second = atlases[turn.target.atlas] {
+            let firstBounds = bounds(frame, interpolated: true)
+            let secondBounds = bounds(turn.target, interpolated: true)
+            b = union(b, bounds(turn.target))
+            uniforms += parameters(turn.target)
+            uniforms += [SIMD4(0,0,0,turn.amount),
+                         SIMD4(frame.mirror,turn.target.mirror,0,0), firstBounds, secondBounds,
+                         SIMD4(frame.nose.x*frame.mirror,frame.nose.y,turn.target.nose.x*turn.target.mirror,turn.target.nose.y)]
+            encoder.setRenderPipelineState(turnPipeline)
+            encoder.setFragmentTexture(second.texture,index:2)
+        } else {
+            encoder.setRenderPipelineState(pipeline)
         }
         let half = SIMD2(Float(DogWindow.size.width / 2), Float(DogWindow.size.height / 2))
         let floor = Float(DogWindow.groundMargin) - half.y + frame.lift
-        let corners = [SIMD2(b.x, b.y), SIMD2(b.z, b.y), SIMD2(b.x, b.w), SIMD2(b.z, b.w)]
-        let vertices = corners.map { local in
-            SIMD4(local.x * frame.mirror / half.x, (floor - local.y) / half.y, local.x, local.y)
+        let corners = [SIMD2(b.x-2,b.y-2), SIMD2(b.z+2,b.y-2), SIMD2(b.x-2,b.w+2), SIMD2(b.z+2,b.w+2)]
+        let samplingMirror = currentTurn != nil ? Float(1) : frame.mirror
+        let vertices = corners.map { p in
+            SIMD4(p.x/half.x, (floor-p.y)/half.y, p.x*samplingMirror, p.y)
         }
-        let uniforms: [SIMD4<Float>] = [
-            SIMD4(frame.pivot.x, frame.pivot.y, frame.targetPivot.x, frame.targetPivot.y),
-            SIMD4(frame.scale, frame.fraction, Float(frame.tile), frame.reversed ? 1 : 0),
-            frame.bounds, frame.targetBounds]
-        encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentTexture(atlas.texture, index: 0)
         encoder.setFragmentTexture(flow, index: 1)
         uniforms.withUnsafeBytes { encoder.setFragmentBytes($0.baseAddress!, length: $0.count, index: 0) }
@@ -203,17 +240,17 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
         if (any(pixel < bounds.xy) || any(pixel >= bounds.zw)) return 0;
         return atlas.sample(linear, pixel/float2(atlas.get_width(),atlas.get_height()), level(lod));
     }
-    fragment float4 photo_fragment(PhotoPixel p [[stage_in]], texture2d<float> atlas [[texture(0)]],
-                                   texture2d<float> flow [[texture(1)]], constant float4 *u [[buffer(0)]]) {
+    float4 gait(float2 pos, float pixelWidth, texture2d<float> atlas,
+                texture2d<float> flow, constant float4 *u) {
         float scale = u[1].x, t = u[1].y;
-        float lod = log2(max(length(dfdx(p.uv)),length(dfdy(p.uv)))/scale);
-        if (t == 0) return photo(atlas,p.uv/scale+u[0].xy,u[2],lod);
+        float lod = log2(pixelWidth/scale);
+        if (t == 0) return photo(atlas,pos/scale+u[0].xy,u[2],lod);
         int tile = int(u[1].z);
         bool reverse = u[1].w > 0;
-        float2 a = p.uv, b = p.uv;
+        float2 a = pos, b = pos;
         for (int i=0; i<3; ++i) {
-            a = p.uv - t*displacement(flow,a,tile,reverse);
-            b = p.uv - (1-t)*displacement(flow,b,tile,!reverse);
+            a = pos - t*displacement(flow,a,tile,reverse);
+            b = pos - (1-t)*displacement(flow,b,tile,!reverse);
         }
         float4 first = photo(atlas,a/scale+u[0].xy,u[2],lod);
         float4 second = photo(atlas,b/scale+u[0].zw,u[3],lod);
@@ -226,6 +263,33 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
         float wa = (1-weight)/(1+t*errorA);
         float wb = weight/(1+(1-t)*errorB);
         return (wa*first+wb*second)/(wa+wb);
+    }
+    fragment float4 photo_fragment(PhotoPixel p [[stage_in]], texture2d<float> atlas [[texture(0)]],
+                                   texture2d<float> flow [[texture(1)]], constant float4 *u [[buffer(0)]]) {
+        return gait(p.uv,max(length(dfdx(p.uv)),length(dfdy(p.uv))),atlas,flow,u);
+    }
+    float mapInterval(float v,float lo,float hi,float a,float b) {
+        return a+(v-lo)*(b-a)/max(hi-lo,0.4);
+    }
+    float remap(float v,float3 mid,float3 dest) {
+        return v < mid.y ? mapInterval(v,mid.x,mid.y,dest.x,dest.y)
+                         : mapInterval(v,mid.y,mid.z,dest.y,dest.z);
+    }
+    fragment float4 turn_fragment(PhotoPixel p [[stage_in]], texture2d<float> first [[texture(0)]],
+            texture2d<float> stride [[texture(1)]], texture2d<float> second [[texture(2)]],
+            constant float4 *u [[buffer(0)]]) {
+        float t = u[8].w, width = max(length(dfdx(p.uv)),length(dfdy(p.uv)));
+        float4 h=u[10], k=u[11], n=u[12];
+        float3 ax=float3(h.x,clamp(n.x,h.x+3,h.z-3),h.z);
+        float3 bx=float3(k.x,clamp(n.z,k.x+3,k.z-3),k.z);
+        float3 ay=float3(h.y,clamp(n.y,h.y+3,h.w-3),h.w);
+        float3 by=float3(k.y,clamp(n.w,k.y+3,k.w-3),k.w);
+        float3 mx=mix(ax,bx,t), my=mix(ay,by,t);
+        float2 a=float2(remap(p.uv.x,mx,ax),remap(p.uv.y,my,ay));
+        float2 b=float2(remap(p.uv.x,mx,bx),remap(p.uv.y,my,by));
+        float4 A = gait(a*float2(u[9].x,1),width,first,stride,u);
+        float4 B = gait(b*float2(u[9].y,1),width,second,stride,u+4);
+        return mix(A,B,smoothstep(0.12,0.88,t));
     }
     """
 }

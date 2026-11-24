@@ -46,6 +46,21 @@ for name, (atlas, rows, first_row, scale, pivot_x) in clips.items():
             frames.append([x, y, x + 362, y + 330, x + 182, y + 320])
     registered[name] = dict(atlas=atlas, scale=scale, frames=frames)
 
+# The turnaround sheet has wider transparent gutters between rows.
+sheet = Image.open(motion / "TurnViews.png").getchannel("A")
+solid = sheet.point(lambda x: 255 if x > 38 else 0)
+rows = [0, 344, 650, 945, sheet.height]
+columns = [0, 299, 594, 889, sheet.width]
+for row, (name, scale) in enumerate([("frontTilt", .39), ("nearSide", .46),
+                                     ("rearSide", .48), ("backTilt", .36)]):
+    frames = []
+    for col in range(4):
+        x, y, r, b = columns[col], rows[row], columns[col+1], rows[row+1]
+        left, top, right, bottom = solid.crop((x,y,r,b)).getbbox()
+        bounds = [max(x,x+left-4), max(y,y+top-4), min(r,x+right+4), min(b,y+bottom+4)]
+        frames.append(bounds + [x+(left+right)//2, y+bottom-2])
+    registered[name] = dict(atlas="TurnViews", scale=scale, frames=frames)
+
 with (motion / "Atlas.json").open("w", encoding="utf-8") as out:
     json.dump(registered, out, separators=(",", ":"), indent=1)
     out.write("\n")

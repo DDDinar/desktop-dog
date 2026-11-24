@@ -58,8 +58,8 @@ for name in clips.keys.sorted() {
     if name == "bed" {
         edges = [(0,1),(0,2),(2,3),(0,4),(4,5),(5,6),(6,7),(7,8),(7,9),(7,10),(10,11),(0,12),(12,13),(0,14),(14,15)]
     } else {
-        let count = name == "jump" || name == "wag" ? 7 : 8
-        edges = (0..<count).map { ($0, ($0+1)%8) }
+        let count = name == "jump" || name == "wag" ? 7 : photos.count
+        edges = (0..<count).map { ($0, ($0+1)%photos.count) }
     }
     for (a,b) in edges {
         try autoreleasepool {
