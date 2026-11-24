@@ -230,15 +230,19 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let s = sizeScale ?? scale
         let size = CGSize(width: DogWindow.size.width * s, height: DogWindow.size.height * s)
         if window.frame.size != size { window.setContentSize(size) }
-        let origin = DogWindow.origin(at: dog.position, scale: s)
-        let previous = window.frame.origin
-        if hypot(previous.x - origin.x, previous.y - origin.y) >= 0.2 {
+        let desired = DogWindow.origin(at: dog.position, scale: s)
+        // WindowServer places windows at integral desktop points even on Retina.
+        // DogView draws the remaining fraction inside the window.
+        let origin = CGPoint(x: desired.x.rounded(), y: desired.y.rounded())
+        if window.frame.origin != origin {
             window.setFrameOrigin(origin)
         }
         if inBed {
             displayBed()
         } else if !window.isVisible || window.occlusionState.contains(.visible) {
             view.display(dog, dt: dt)
+        } else {
+            view.suspendRoaming()
         }
     }
 
@@ -308,6 +312,7 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
             reveal()
         } else {
             hidden = true
+            view.suspendRoaming()
             timer?.invalidate()
             timer = nil
             window.orderOut(nil)

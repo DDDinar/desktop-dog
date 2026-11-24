@@ -7,7 +7,7 @@ enum Pose: Equatable {
 
     var strideLength: CGFloat {
         switch self {
-        case .walk: return 42
+        case .walk: return 48
         case .run: return 52
         default: return 0
         }
@@ -369,7 +369,18 @@ struct Dog {
             return true
         }
         let bearing = atan2(dy / Self.cameraDepth, dx)
-        let error = turn(toward: bearing, maxChange: (steering ? 8 : 1.9) * dt)
+        // Come off a loaded walking foot before pivoting back. Keeping this
+        // final travel in the normal gait clock preserves the stride on braking.
+        let bearingError = atan2(sin(bearing-heading),cos(bearing-heading))
+        if !steering && abs(bearingError)>0.42 && movementSpeed>0 {
+            let nextSpeed = max(0,movementSpeed-acceleration*dt)
+            let travel = (movementSpeed+nextSpeed)*0.5*dt
+            position = bounds.clamp(CGPoint(x:position.x+cos(heading)*travel,
+                y:position.y+sin(heading)*travel*Self.cameraDepth))
+            movementSpeed = nextSpeed
+            return false
+        }
+        let error = turn(toward: bearing, maxChange: (steering ? 8 : 1.7) * dt)
         // A walk starts with a turn in place. At a run the dog follows a
         // curve, slowing into tight turns instead of running sideways.
         if !steering && abs(error) > 0.10 {

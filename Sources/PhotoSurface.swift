@@ -38,6 +38,20 @@ private struct PhotoTexture {
     }
 }
 
+/// Decode a single upcoming view while the dog is turning toward its destination.
+private final class PendingWalkAtlas {
+    let name: String
+    let completion = DispatchGroup()
+    private(set) var texture: PhotoTexture?
+
+    init(name: String, url: URL, device: MTLDevice, queue: MTLCommandQueue) {
+        self.name = name
+        DispatchQueue.global(qos: .userInitiated).async(group: completion) { [self] in
+            texture = autoreleasepool { PhotoTexture(device: device, queue: queue, url: url) }
+        }
+    }
+}
+
 /// One rigid photograph per draw. Heading changes and the chase never clear
 /// the old drawable until a complete replacement has been encoded.
 final class PhotoSurface: MTKView, MTKViewDelegate {
@@ -45,9 +59,13 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
     private let pipeline: MTLRenderPipelineState
     private let atlasURLs: [String: URL]
     private var atlases: [String: PhotoTexture] = [:]
+    private var walkOrder: [String] = []
+    private var pendingWalk: PendingWalkAtlas?
     private let turnPipeline: MTLRenderPipelineState
     private var currentTurn: PhotoAppearance.Turn?
     private let flow: MTLTexture
+    private let startingAppearance: PhotoAppearance
+    private var floorOffset = SIMD2<Float>.zero
     private var animation: PhotoAppearance
     private var current: PhotoFrame?
 
@@ -101,6 +119,7 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
         self.queue = queue
         self.pipeline = pipeline
         self.atlasURLs = atlasURLs
+        startingAppearance = appearance
         animation = appearance
         super.init(frame: frame, device: device)
         colorPixelFormat = .bgra8Unorm
@@ -115,31 +134,84 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
     required init(coder: NSCoder) { fatalError("PhotoSurface is created from its asset bundle") }
     override var isOpaque: Bool { false }
 
-    func update(_ dog: Dog, dt: TimeInterval, scale: CGFloat) {
+    var isSettledStanding: Bool { animation.isSettledStanding }
+
+    func resumeRoaming() {
+        animation = startingAppearance
+    }
+
+    func update(_ dog: Dog, dt: TimeInterval, scale: CGFloat, offset: CGPoint = .zero) {
+        let nextOffset = SIMD2(Float(offset.x), Float(offset.y))
+        if floorOffset != nextOffset {
+            floorOffset = nextOffset
+            needsDisplay = true
+        }
+        if let job = pendingWalk, job.completion.wait(timeout: .now()) == .success {
+            finishLoading(job)
+        }
+        if case let .walk(target, _) = dog.activity, pendingWalk == nil {
+            let dx = target.x - dog.position.x, dy = target.y - dog.position.y
+            let heading = atan2(dy / Dog.cameraDepth, dx)
+            let name = animation.walkAtlas(for: heading)
+            if atlases[name] == nil, let device, let url = atlasURLs[name] {
+                pendingWalk = PendingWalkAtlas(name: name, url: url, device: device, queue: queue)
+            }
+        }
         let frame = animation.frame(for: dog, dt: dt, windowScale: scale)
         display(frame, turn: animation.turn)
+        // Keep both views of the newly selected frame alive until encoding.
+        while walkOrder.count > 3, let i = walkOrder.firstIndex(where: {
+            $0 != current?.atlas && $0 != currentTurn?.target.atlas
+        }) {
+            atlases[walkOrder.remove(at: i)] = nil
+        }
     }
 
     func updateBed(_ sample: BedLife.Sample) {
+        floorOffset = .zero
+        pendingWalk = nil
+        for name in walkOrder { atlases[name] = nil }
+        walkOrder.removeAll(keepingCapacity: true)
         animation.resetContacts()
         display(animation.bedFrame(sample))
     }
 
     func prepareRoaming() {
-        // Keep the walking textures out of memory at a normal launch, and
-        // load them before the first walk so the animation doesn't stall.
+        // Large directional walk sheets are loaded separately as destinations change.
         let bedAtlas = animation.bedFrame(.init(from: 0, to: 0, phase: 4)).atlas
-        for name in atlasURLs.keys where name != bedAtlas {
+        for name in atlasURLs.keys where name != bedAtlas && !name.hasPrefix("Walk") {
             _ = loadAtlas(name)
         }
     }
 
+    private func finishLoading(_ job: PendingWalkAtlas) {
+        if let texture = job.texture {
+            atlases[job.name] = texture
+            touchWalk(job.name)
+        }
+        pendingWalk = nil
+    }
+
+    private func touchWalk(_ name: String) {
+        guard name.hasPrefix("Walk"), walkOrder.last != name else { return }
+        walkOrder.removeAll { $0 == name }
+        walkOrder.append(name)
+    }
+
     @discardableResult
     private func loadAtlas(_ name: String) -> Bool {
-        if atlases[name] != nil { return true }
+        if let job = pendingWalk, job.name == name {
+            job.completion.wait()
+            finishLoading(job)
+        }
+        if atlases[name] != nil {
+            touchWalk(name)
+            return true
+        }
         guard let device, let url = atlasURLs[name],
               let texture = PhotoTexture(device: device, queue: queue, url: url) else { return false }
         atlases[name] = texture
+        touchWalk(name)
         return true
     }
 
@@ -208,7 +280,12 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
             encoder.setRenderPipelineState(turnPipeline)
             encoder.setFragmentTexture(second.texture,index:2)
         } else {
-            uniforms += [SIMD4(frame.mirror,0,0,0)] + contactParameters(frame)
+            var maxShiftSquared: Float = 0
+            for (leg,p) in frame.pawPins.enumerated() where frame.pawVisibility[leg] > 0 {
+                let delta = SIMD2(p.z-p.x,p.w-p.y)
+                maxShiftSquared = max(maxShiftSquared,simd_length_squared(delta))
+            }
+            uniforms += [SIMD4(frame.mirror,maxShiftSquared,0,0)] + contactParameters(frame)
             encoder.setRenderPipelineState(pipeline)
         }
         for pin in frame.pawPins {
@@ -218,7 +295,7 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
         let floor = Float(DogWindow.groundMargin) - half.y + frame.lift
         let corners = [SIMD2(b.x-2,b.y-2), SIMD2(b.z+2,b.y-2), SIMD2(b.x-2,b.w+2), SIMD2(b.z+2,b.w+2)]
         let vertices = corners.map { p in
-            SIMD4(p.x/half.x, (floor-p.y)/half.y, p.x, p.y)
+            SIMD4((p.x+floorOffset.x)/half.x, (floor+floorOffset.y-p.y)/half.y, p.x, p.y)
         }
         encoder.setFragmentTexture(atlas.texture, index: 0)
         encoder.setFragmentTexture(flow, index: 1)
@@ -277,6 +354,29 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
     }
     float2 plant(float2 p, float4 visible, thread float4 *pins) {
         if (!any(visible > 0.0) || p.y < -80) return p;
+        // Keep each toe inside the shin's reach. In a foreshortened view the
+        // far paw may project behind the near paw; moving both here would bend
+        // the visible shin into a loop. Leave that occluded colour with the
+        // near leg. Only the active swing needs the full vertical adjustment.
+        for (int i=0; i<4; ++i) {
+            if (visible[i] <= 0) continue;
+            float clearance=30.0;
+            for (int j=0; j<4; ++j) {
+                if (j==i || visible[j]<=0) continue;
+                float2 separation = pins[i].xy-pins[j].xy;
+                clearance=min(clearance,length(separation));
+                if (separation.y < -2.0) {
+                    float landingLane=pins[i].z-pins[j].z;
+                    float gap=separation.x*landingLane>0 ? min(abs(separation.x),abs(landingLane)) : 0.0;
+                    float lane=smoothstep(1.5,9.0,gap);
+                    float behind=1.0-smoothstep(0.0,21.0,-separation.y);
+                    visible[i] *= mix(1.0,lane,behind);
+                }
+            }
+            float2 correction=pins[i].zw-pins[i].xy;
+            float reach=clamp(0.44*clearance,3.0,7.5);
+            pins[i].zw=pins[i].xy+correction*min(1.0,reach/max(0.01,length(correction)));
+        }
         // Integrate small inverse displacements. A single large inverse offset
         // folds a shin over itself when the two photographs have different strides.
         for (int step=0;step<8;step++) {
@@ -289,7 +389,7 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
                 float2 d = p - mix(pin.xy,pin.zw,phase);
                 d.y *= d.y < 0 ? 0.68 : 1.05;
                 float r2 = dot(d,d);
-                float reach = 1-smoothstep(25.0,1156.0,r2);
+                float reach = 1-smoothstep(64.0,1444.0,r2);
                 float inverse = 1.0/max(2.0,r2);
                 float w = visible[i]*reach*inverse*inverse;
                 total += w;
@@ -300,13 +400,35 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
         }
         return p;
     }
+    // Baked walking frames already contain knee and ankle articulation. Between
+    // two exposures a subframe registration needs only one inverse translation.
+    float2 subframeOffset(float2 p, constant float4 *registration) {
+        float2 sum = 0;
+        float weightSum = 0, envelope = 0;
+        for (int i=0;i<4;i++) {
+            float4 pin=registration[i+1];
+            float2 d=p-pin.zw;
+            d.y*=d.y<0 ? 0.68 : 1.05;
+            float r2=dot(d,d);
+            float reach=registration[0][i]*(1-smoothstep(64.0,1444.0,r2));
+            float w=reach/max(4.0,r2*r2);
+            sum+=w*(pin.xy-pin.zw);
+            weightSum+=w;
+            envelope=max(envelope,reach);
+        }
+        return p+envelope*sum/max(1.0e-12,weightSum);
+    }
     fragment float4 photo_fragment(PhotoPixel p [[stage_in]], texture2d<float> atlas [[texture(0)]],
                                    texture2d<float> flow [[texture(1)]], constant float4 *u [[buffer(0)]]) {
         float2 pos = p.uv;
-        if (any(u[5]>0.0) && pos.y > -80) {
-            float4 pins[4];
-            for (int i=0;i<4;i++) pins[i]=u[6+i];
-            pos = plant(pos,u[5],pins);
+        if (u[4].y>0.01 && pos.y > -80) {
+            if (u[4].y<4.0) {
+                pos=subframeOffset(pos,u+5);
+            } else {
+                float4 pins[4];
+                for (int i=0;i<4;i++) pins[i]=u[6+i];
+                pos=plant(pos,u[5],pins);
+            }
         }
         return gait(pos*float2(u[4].x,1),max(length(dfdx(p.uv)),length(dfdy(p.uv))),atlas,flow,u);
     }

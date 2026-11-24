@@ -26,7 +26,7 @@ struct PhotoAppearance {
         let atlas: String
         let scale: Float
         let frames: [[Float]]
-        let pivotFrame: Int?
+        let toes: [[Float]]?
 
         func frame(_ index: Int, mirror: Float = 1, lift: Float = 0) -> PhotoFrame {
             let f = frames[index]
@@ -40,27 +40,8 @@ struct PhotoAppearance {
         case right, rearSideRight, awayRight, backTiltRight, away, backTiltLeft, awayLeft, rearSideLeft
         case left, nearSideLeft, towardLeft, frontTiltLeft, toward, frontTiltRight, towardRight, nearSideRight
 
-        var clip: String {
-            switch self {
-            case .right, .left: return "side"
-            case .awayRight, .awayLeft: return "far"
-            case .towardLeft, .towardRight: return "near"
-            case .rearSideLeft, .rearSideRight: return "rearSide"
-            case .backTiltLeft, .backTiltRight: return "backTilt"
-            case .nearSideLeft, .nearSideRight: return "nearSide"
-            case .frontTiltLeft, .frontTiltRight: return "frontTilt"
-            case .away: return "back"
-            case .toward: return "front"
-            }
-        }
-
-        var mirror: Float {
-            switch self {
-            case .left, .awayRight, .towardLeft, .rearSideLeft, .backTiltLeft, .nearSideLeft, .frontTiltLeft: return -1
-            default: return 1
-            }
-        }
-
+        var pivotIndex: Int { [4,5,6,7,8,7,6,5,4,3,2,1,0,1,2,3][rawValue] }
+        var pivotMirror: Float { (5...11).contains(rawValue) ? -1 : 1 }
         var sideOn: Bool { self == .right || self == .left }
 
     }
@@ -76,7 +57,12 @@ struct PhotoAppearance {
     private let flowIndex: [String: Int]
     private let clips: [String: Clip]
     private(set) var turn: Turn?
+    private(set) var isSettledStanding = true
     private var facing: CGFloat?
+    private var yawSpeed: CGFloat = 0
+    private var restSide: CGFloat = 1
+    private var wasStanding = true
+    private var strideStrength: Float = 0
     private var previousHeading: CGFloat?
     private var straightTime: TimeInterval = 0
     private var cruisingView: Int?
@@ -90,37 +76,37 @@ struct PhotoAppearance {
 
     init?(assets: URL) {
         let manifest = assets.appendingPathComponent("Motion/Atlas.json")
-        let turns = ["frontTilt", "nearSide", "rearSide", "backTilt"]
-        let breaks = ["urinate", "defecate"]
-        let required = turns + breaks + ["side", "near", "far", "front", "back", "trot", "jump", "wag", "bed"]
+        let frameCounts = ["pivot":9, "bed":16, "urinate":6, "defecate":6,
+                           "trot":8, "jump":8, "wag":8]
         guard let data = try? Data(contentsOf: manifest),
               let clips = try? JSONDecoder().decode([String: Clip].self, from: data),
-              required.allSatisfy({ name in
-                  let count = name == "bed" ? 16 : breaks.contains(name) ? 6 : turns.contains(name) ? 4 : 8
+              frameCounts.allSatisfy({ name,count in
                   guard let clip = clips[name], clip.scale > 0, clip.frames.count == count else { return false }
-                  if !breaks.contains(name) && name != "bed" && name != "jump" {
-                      guard let i = clip.pivotFrame, clip.frames.indices.contains(i) else { return false }
+                  if name == "pivot" {
+                      guard let toes = clip.toes, toes.count == 9, toes.allSatisfy({ $0.count == 12 }) else { return false }
                   }
                   return clip.frames.allSatisfy { f in f.count == 6 && f[0] < f[2] && f[1] < f[3] }
               }) else { return nil }
         guard let indexData = try? Data(contentsOf: assets.appendingPathComponent("Motion/Flow.json")),
               let index = try? JSONDecoder().decode([String: Int].self, from: indexData) else { return nil }
+        guard let walkData = try? Data(contentsOf: assets.appendingPathComponent("Motion/Walk.json")),
+              let walks = try? JSONDecoder().decode([String: Clip].self, from: walkData),
+              (0..<9).allSatisfy({ view in
+                  guard let clip = walks["walk\(view)"], clip.atlas == "Walk\(view)", clip.scale > 0,
+                        clip.frames.count == 84, let toes = clip.toes, toes.count == 84 else { return false }
+                  return toes.allSatisfy { $0.count == 8 } &&
+                      clip.frames.allSatisfy { $0.count == 6 && $0[2] > $0[0] && $0[3] > $0[1] }
+              }) else { return nil }
         flowIndex = index
-        self.clips = clips
+        self.clips = clips.merging(walks) { original, _ in original }
     }
-
-    // Nose positions (the crown for the back view), in points relative to the floor pivot.
-    private static let noses: [String: SIMD2<Float>] = [
-        "side":[54,-76], "far":[-44,-108], "back":[0,-80], "near":[33,-73],
-        "front":[0,-52], "trot":[62,-88], "wag":[42,-89], "frontTilt":[19,-70],
-        "nearSide":[45,-80], "rearSide":[64,-85], "backTilt":[30,-94]
-    ]
 
     private func transition(_ name: String, _ a: Int, _ b: Int, _ t: Float,
                             mirror: Float = 1, lift: Float = 0) -> PhotoFrame {
         let clip = clips[name]!
         var frame = clip.frame(a, mirror: mirror, lift: lift)
-        frame.nose = Self.noses[name] ?? .zero
+        if name == "wag" { frame.nose = [42,-89] }
+        if name == "trot" { frame.nose = [62,-88] }
         if a == b || t <= 0 { return frame }
         var target = clip.frame(b, mirror: mirror, lift: lift)
         target.nose = frame.nose
@@ -153,145 +139,210 @@ struct PhotoAppearance {
         return frame
     }
 
-    private func gait(_ view: Direction, _ phase: CGFloat) -> PhotoFrame {
-        let clip = running && view.sideOn ? "trot" : view.clip
-        let count = Float(clips[clip]!.frames.count)
-        var position = Float(phase + (view.mirror < 0 ? 0.5 : 0))*count
-        if planting > 0, let neutral = clips[clip]?.pivotFrame {
-            // Ease along the shorter part of the original photographic cycle to
-            // a balanced stance. Toe-off during a pivot belongs to the contact solver.
-            let delta = (Float(neutral)-position).remainder(dividingBy:count)
-            position += delta*planting
+    /// Each photograph has three baked stride amplitudes. Match the nearest
+    /// exposure and use its registered toes for the small subframe correction.
+    private func gait(_ view: Direction, _ phase: CGFloat, strength: Float) -> PhotoFrame {
+        if running && view.sideOn {
+            let t = ((Float(phase) + (view.pivotMirror < 0 ? 0.5 : 0)) * 8)
+                .truncatingRemainder(dividingBy: 8)
+            let i = Int(t)
+            return markedFrame("trot", i, (i+1)%8, t-Float(i), mirror: view.pivotMirror)
         }
-        position = (position+2*count).truncatingRemainder(dividingBy:count)
-        let i = Int(position)
-        return markedFrame(clip,i,(i+1)%Int(count),position-Float(i),mirror:view.mirror)
+        let mirror = view.pivotMirror
+        let cycle = (Float(phase) + (mirror < 0 ? 0.5 : 0)).truncatingRemainder(dividingBy: 1)
+        let clip = clips["walk\(view.pivotIndex)"]!
+        let toes = clip.toes!
+        let band: (start: Int, count: Int)
+        switch strength {
+        case ..<0.485: band = (0, 12)
+        case ..<0.825: band = (12, 24)
+        default: band = (36, 48)
+        }
+        let sample = band.start + Int((cycle*Float(band.count)).rounded()) % band.count
+        let full = cycle*48
+        let i = Int(full), t = full-Float(i)
+        let neutral = pivotToes(view)
+        let useNeutral = strength < 0.16
+        var frame = useNeutral ? pivotFrame(view) : clip.frame(sample, mirror: mirror)
+        if useNeutral { frame.pawPins.removeAll(keepingCapacity: true) }
+        frame.nose = pivotNose(view)
+        for leg in 0..<4 {
+            let j = 2*(mirror < 0 ? leg ^ 1 : leg)
+            func toe(_ sample: Int) -> SIMD2<Float> {
+                SIMD2(toes[sample][j]*mirror, toes[sample][j+1])
+            }
+            let rest = SIMD2(neutral[leg].x,neutral[leg].y)
+            let current = useNeutral ? rest : toe(sample)
+            let a = toe(36+i), b = toe(36+(i+1)%48)
+            let target = rest + (a + (b-a)*t-rest)*strength
+            frame.pawPins.append(SIMD4(current.x,current.y,target.x,target.y))
+            // Even far paws can appear from behind the body on a stride.
+            frame.pawVisibility[leg] = strength > 0.35 ? 1 : neutral[leg].z
+        }
+        return frame
+    }
+
+    private func pivotToes(_ view: Direction) -> [SIMD3<Float>] {
+        let row = clips["pivot"]!.toes![view.pivotIndex]
+        let mirror = view.pivotMirror
+        return (0..<4).map { leg in
+            let i = 3 * (mirror < 0 ? leg ^ 1 : leg)
+            return SIMD3(row[i]*mirror,row[i+1],row[i+2])
+        }
+    }
+
+    private func pivotNose(_ view: Direction) -> SIMD2<Float> {
+        let noses: [SIMD2<Float>] = [[6,-79],[24,-79],[47,-78],[60,-85],[78,-88],
+                                      [64,-89],[51,-101],[41,-102],[-2,-125]]
+        return noses[view.pivotIndex]
+    }
+
+    private func pivotFrame(_ view: Direction) -> PhotoFrame {
+        var frame = clips["pivot"]!.frame(view.pivotIndex, mirror:view.pivotMirror)
+        frame.nose = pivotNose(view)
+        for (i,p) in pivotToes(view).enumerated() {
+            frame.pawPins.append(SIMD4(p.x,p.y,p.x,p.y))
+            frame.pawVisibility[i] = p.z
+        }
+        return frame
+    }
+
+    private func views(at angle: CGFloat) -> (Direction,Direction,Float) {
+        let sector = (angle / (.pi/8) + 32).truncatingRemainder(dividingBy:16)
+        let i = Int(sector)
+        return (Direction(rawValue:i)!, Direction(rawValue:(i+1)%16)!, Float(sector-CGFloat(i)))
+    }
+
+    func walkAtlas(for heading: CGFloat) -> String {
+        let (first, second, fraction) = views(at: heading)
+        return "Walk\(fraction < 0.5 ? first.pivotIndex : second.pivotIndex)"
     }
 
     private func footprint(_ angle: CGFloat) -> [SIMD2<Float>] {
-        let sector = (angle/(.pi/8)+32).truncatingRemainder(dividingBy:16)
-        let i = Int(sector), t = Float(sector-CGFloat(i))
-        func toes(_ i: Int) -> [SIMD3<Float>] {
-            let view = Direction(rawValue:i%16)!
-            return PivotRegistration.points(view.clip,clips[view.clip]!.pivotFrame!,mirror:view.mirror)
-        }
-        return zip(toes(i),toes(i+1)).map { a,b in
-            let p = a+(b-a)*t
-            return SIMD2(p.x,p.y)
+        let (a,b,t) = views(at:angle)
+        let wag = PivotRegistration.points("wag",3,mirror:Float(restSide))
+        return zip(zip(pivotToes(a), pivotToes(b)),wag).map { pair,w in
+            let p = pair.0 + (pair.1-pair.0)*t
+            return SIMD2(p.x+(w.x-p.x)*Float(stance),p.y+(w.y-p.y)*Float(stance))
         }
     }
 
     private mutating func contacts(_ first: PhotoFrame, second: PhotoFrame? = nil, fraction: Float = 0,
-                                   tile: Int? = nil, views: (Int,Int)? = nil, dog: Dog, angle: CGFloat, advance: CGFloat,
+                                   tile: Int? = nil, outlines: (Int,Int)? = nil, dog: Dog, angle: CGFloat,
                                    dt: TimeInterval, scale: CGFloat) -> PhotoFrame {
         var a = first, b = second
-        if planting > 0 {
-            let left = cos(angle) < 0
-            let wag = PivotRegistration.points("wag",3,mirror:left ? -1 : 1)
-            func target(_ angle: CGFloat) -> [SIMD2<Float>] {
-                zip(footprint(angle),wag).map { toe, w in
-                    toe + (SIMD2(w.x,w.y)-toe)*Float(stance)
-                }
-            }
-            let rest = target(angle), ahead = target(angle+advance)
+        if planting > 0 && a.pawPins.count == 4 && (b == nil || b!.pawPins.count == 4) {
             let initial = a.pawPins.indices.map { leg in
                 let p = a.pawPins[leg], q = b?.pawPins[leg] ?? p
-                return SIMD2(p.x+(q.x-p.x)*fraction, p.y+(q.y-p.y)*fraction)
+                return SIMD2(p.x+(q.x-p.x)*fraction,p.y+(q.y-p.y)*fraction)
             }
-            let planted = steps.place(initial:initial,neutral:rest,ahead:ahead,origin:dog.position,
-                                      scale:scale,dt:dt,settling:dog.pose == .stand)
-            func apply(_ frame: inout PhotoFrame) {
-                for i in frame.pawPins.indices {
-                    frame.pawPins[i].z = planted[i].x
-                    frame.pawPins[i].w = planted[i].y
+            let placed = steps.place(initial:initial, neutral:footprint(angle),
+                                     ahead:footprint(angle+yawSpeed*0.24), origin:dog.position,
+                                     scale:scale,dt:dt)
+            func attach(_ frame: inout PhotoFrame) {
+                for i in 0..<4 {
+                    let p = frame.pawPins[i]
+                    frame.pawPins[i].z = p.z + (placed[i].x-p.z)*planting
+                    frame.pawPins[i].w = p.w + (placed[i].y-p.w)*planting
                 }
-                frame.pawVisibility *= planting
             }
-            apply(&a)
-            if b != nil { apply(&b!) }
+            attach(&a)
+            if b != nil { attach(&b!) }
+            if b == nil && a.pawPins.allSatisfy({ p in abs(p.x-p.z)+abs(p.y-p.w)<0.04 }) {
+                a.pawPins = []
+                a.pawVisibility = .zero
+            }
         }
         if let b {
-            let weight = max(0,min(1,(planting-0.3)/0.7))
-            func outline(_ i: Int) -> Int {
-                guard let base = flowIndex["pivot/outline/\(i/4)"] else { return -1 }
-                return base*4+i%4
+            func component(_ view: Int) -> Int {
+                guard let base = flowIndex["pivot/outline/\(view/4)"] else { return -1 }
+                return base*4+view%4
             }
-            let fields = views.map { SIMD2(outline($0.0),outline($0.1)) } ?? SIMD2(repeating:-1)
-            turn = Turn(target:b,amount:fraction,angularTile:tile,angularWeight:weight*weight*(3-2*weight),
+            let fields = outlines.map { SIMD2(component($0.0),component($0.1)) } ?? SIMD2(repeating:-1)
+            turn = Turn(target:b, amount:fraction, angularTile:tile, angularWeight:planting,
                         outlines:fields)
         }
         return a
     }
 
-    /// Resolve each visible angle into two neighbouring views of the same step.
-    /// Both views sample the same stride before their silhouettes are aligned.
     private mutating func facingFrame(_ dog: Dog, dt: TimeInterval, scale: CGFloat) -> PhotoFrame {
         let standing = dog.pose == .stand
-        let initialRest: CGFloat = cos(dog.heading) >= 0 ? -.pi/4 : -.pi*3/4
-        let start = facing ?? (standing ? initialRest : dog.heading)
+        if facing == nil || (standing && !wasStanding) {
+            if abs(cos(dog.heading)) > 0.08 { restSide = cos(dog.heading) < 0 ? -1 : 1 }
+            else if let facing { restSide = cos(facing) < 0 ? -1 : 1 }
+        }
+        let restAngle: CGFloat = restSide < 0 ? -.pi*3/4 : -.pi/4
         if facing == nil && !standing { stance = 0 }
-        let left = cos(start) < 0
-        let restAngle: CGFloat = left ? -.pi*3/4 : -.pi/4
-        let headingChange = dog.heading-(previousHeading ?? dog.heading)
-        let stable = abs(atan2(sin(headingChange),cos(headingChange))) < 0.09*dt
+        let start = facing ?? (standing ? restAngle : dog.heading)
+        wasStanding = standing
+        let headingChange = dog.heading - (previousHeading ?? dog.heading)
         previousHeading = dog.heading
-        straightTime = stable && dog.gaitStrength > 0.15 ? straightTime+dt : 0
+        let steady = abs(atan2(sin(headingChange),cos(headingChange))) < 0.1*dt
+        straightTime = steady && dog.gaitStrength > 0.18 ? straightTime + dt : 0
         var target = standing || stance > 0 ? restAngle : dog.heading
-        if straightTime >= 0.12 && !standing && stance == 0 {
-            // At a steady course show one complete photographic view. Hysteresis
-            // avoids oscillating between neighbouring cameras at their boundary.
+        if straightTime > 0.12 && stance == 0 && !standing {
             let sector = target/(.pi/8)
-            let old = CGFloat(cruisingView ?? Int(sector.rounded()))
-            let distance = (sector-old).remainder(dividingBy:16)
-            if cruisingView == nil || abs(distance)>0.60 { cruisingView = Int(sector.rounded()) }
+            let old = cruisingView ?? Int(sector.rounded())
+            if cruisingView == nil || abs((sector-CGFloat(old)).remainder(dividingBy:16))>0.59 {
+                cruisingView = Int(sector.rounded())
+            }
             target = CGFloat(cruisingView!)*(.pi/8)
         }
         let delta = atan2(sin(target-start), cos(target-start))
-        let limit = CGFloat(dt) * (dog.gaitStrength < 0.04 ? 2.7 : 5.8)
-        let eased = abs(delta) < 0.003 ? delta : delta * (1 - exp(-dt/0.05))
-        let change = max(-limit, min(limit, eased))
-        let angle = start + change
-        facing = atan2(sin(angle), cos(angle))
-        let pivoting = dog.gaitStrength < 0.04 && (abs(change) > 0.001 ||
-            (!standing && stance > 0) || (planting > 0 && (!standing || stance < 1 || !steps.settled)))
-        let rate = Float(dt) / 0.17
-        planting = pivoting ? min(1,planting+rate) : max(0,planting-rate)
+        // A new target can arrive mid-step. Decelerate the turn while the
+        // current paw finishes its swing, then accelerate in the new direction.
+        let acceleration: CGFloat = dog.pose == .run ? 48 : 18
+        let maxRate: CGFloat = dog.pose == .run ? 7.0 : 2.45
+        let goalRate = copysign(min(maxRate, sqrt(2*acceleration*abs(delta))),delta)
+        yawSpeed += max(-acceleration*dt,min(acceleration*dt,goalRate-yawSpeed))
+        var change = yawSpeed*dt
+        if change*delta >= 0 && abs(change)>=abs(delta) {
+            change = delta
+            yawSpeed = dt > 0 ? change/dt : 0
+        }
+        let angle = atan2(sin(start+change),cos(start+change))
+        facing = angle
+        if !standing { stance = max(0,stance-dt/0.25) }
+        if standing && abs(delta-change)<0.008 { stance = min(1,stance+dt/0.29) }
+        running = dog.pose == .run
+        let desiredStrength: Float = standing || stance>0 ? 0 : Float(dog.gaitStrength)
+        strideStrength += min(Float(dt/0.30),max(-Float(dt/0.20),desiredStrength-strideStrength))
+        planting = 1-strideStrength
         if planting == 0 { steps.reset() }
-        let advance = max(-0.26,min(0.26,change/max(dt,0.001)*0.09))
-        if !standing { running = dog.pose == .run }
-        let phase = dog.gaitPhase
-        if standing && abs(delta-change) < 0.0001 { stance = min(1, stance + dt/0.22) }
-        if !standing { stance = max(0, stance - dt/0.22) }
+        isSettledStanding = standing && stance == 1 && steps.settled && abs(yawSpeed)<0.01
         if stance > 0 {
-            let mirror: Float = left ? -1 : 1
             if stance == 1 {
-                wagClock = (wagClock + dt * 15 * Double(dog.joy)).truncatingRemainder(dividingBy: 14)
+                wagClock = (wagClock+dt*15*Double(dog.joy)).truncatingRemainder(dividingBy:14)
             }
-            let wag = dog.joy > 0.12 ? min(wagClock, 14-wagClock) : 3
-            let wagFrame = markedFrame("wag",Int(wag),min(7,Int(wag)+1),Float(wag-Double(Int(wag))),mirror:mirror)
+            let wag = dog.joy>0.12 ? min(wagClock,14-wagClock) : 3
+            let frame = markedFrame("wag",Int(wag),min(7,Int(wag)+1),Float(wag-Double(Int(wag))),mirror:Float(restSide))
             if stance == 1 {
-                return contacts(wagFrame,dog:dog,angle:angle,advance:0,dt:dt,scale:scale)
+                return contacts(frame,dog:dog,angle:restAngle,dt:dt,scale:scale)
             }
-            return contacts(gait(left ? .towardLeft : .towardRight,phase),second:wagFrame,
-                            fraction:Float(stance),tile:flowIndex["pivot/\(left ? 10 : 14)/wag"],views:(left ? 10 : 14,left ? 17 : 16),dog:dog,angle:angle,advance:advance,dt:dt,scale:scale)
+            let view: Direction = restSide<0 ? .towardLeft : .towardRight
+            return contacts(pivotFrame(view),second:frame,fraction:Float(stance),
+                            tile:flowIndex["pivot/\(view.rawValue)/wag"],
+                            outlines:(view.rawValue,restSide<0 ? 17 : 16),dog:dog,angle:restAngle,dt:dt,scale:scale)
         }
-        let sector = (angle/(.pi/8) + 32).truncatingRemainder(dividingBy: 16)
-        let i = Int(sector)
-        let a = Direction(rawValue:i)!, b = Direction(rawValue:(i+1)%16)!
-        let fraction = Float(sector-CGFloat(i))
-        let first = gait(a,phase)
-        if fraction < 0.0001 {
-            return contacts(first,dog:dog,angle:angle,advance:advance,dt:dt,scale:scale)
+        let (a,b,t) = views(at:angle)
+        func pose(_ view: Direction) -> PhotoFrame {
+            strideStrength>0 ? gait(view,dog.gaitPhase,strength:strideStrength) : pivotFrame(view)
         }
-        let second = gait(b,phase)
-        if fraction > 0.9999 {
-            return contacts(second,dog:dog,angle:angle,advance:advance,dt:dt,scale:scale)
-        }
-        return contacts(first,second:second,fraction:fraction,tile:flowIndex["pivot/\(i)/\((i+1)%16)"],views:(i,(i+1)%16),dog:dog,angle:angle,advance:advance,dt:dt,scale:scale)
+        if t < 0.0001 { return contacts(pose(a),dog:dog,angle:angle,dt:dt,scale:scale) }
+        if t > 0.9999 { return contacts(pose(b),dog:dog,angle:angle,dt:dt,scale:scale) }
+        return contacts(pose(a),second:pose(b),fraction:t,tile:flowIndex["pivot/\(a.rawValue)/\(b.rawValue)"],
+                        outlines:(a.rawValue,b.rawValue),dog:dog,angle:angle,dt:dt,scale:scale)
     }
 
     mutating func resetContacts() {
         planting = 0
+        strideStrength = 0
+        yawSpeed = 0
+        straightTime = 0
+        cruisingView = nil
+        previousHeading = nil
+        wasStanding = false
+        isSettledStanding = false
         steps.reset()
     }
 
@@ -303,6 +354,7 @@ struct PhotoAppearance {
         case .walk, .run, .stand:
             return facingFrame(dog, dt: dt, scale: windowScale)
         case let .bathroom(kind):
+            restSide = facesLeft ? -1 : 1
             facing = facesLeft ? -.pi*3/4 : -.pi/4
             stance = 1
             let position = min(5, kind.keyframe(at: dog.bathroomTime))

@@ -6,7 +6,7 @@ import simd
 import ImageIO
 import UniformTypeIdentifiers
 
-struct Clip: Decodable { let atlas: String; let scale: Double; let frames: [[Double]]; let pivotFrame: Int? }
+struct Clip: Decodable { let atlas: String; let scale: Double; let frames: [[Double]] }
 let folder = URL(fileURLWithPath: "Assets/Photo/Motion")
 let clips = try JSONDecoder().decode([String: Clip].self, from: Data(contentsOf: folder.appendingPathComponent("Atlas.json")))
 let width = 216, height = 200, tileW = 108, tileH = 100
@@ -106,7 +106,7 @@ func bakePair(_ key: String, _ from: CGImage, _ to: CGImage, approach: Int? = ni
     tile += 1
 }
 
-for name in clips.keys.sorted() {
+for name in clips.keys.sorted() where name != "pivot" {
     let clip = clips[name]!
     let url = name == "bed" ? URL(fileURLWithPath: CommandLine.arguments[1]) : folder.appendingPathComponent(clip.atlas + ".png")
     let atlas = CGImageSourceCreateImageAtIndex(CGImageSourceCreateWithURL(url as CFURL,nil)!,0,nil)!
@@ -127,17 +127,15 @@ for name in clips.keys.sorted() {
 
 // Turn views are compared after projection onto the same screen-space floor,
 // including reflection. RG and BA therefore remain screen-space vectors.
-let directions: [(name: String, mirror: Bool)] = [
-    ("side", false), ("rearSide", false), ("far", true), ("backTilt", false),
-    ("back", false), ("backTilt", true), ("far", false), ("rearSide", true),
-    ("side", true), ("nearSide", true), ("near", true), ("frontTilt", true),
-    ("front", false), ("frontTilt", false), ("near", false), ("nearSide", false)
-]
-func pivotPose(_ name: String, _ mirror: Bool, transparent: Bool = false) -> CGImage {
+let pivotIndices = [4,5,6,7,8,7,6,5,4,3,2,1,0,1,2,3]
+let directions = pivotIndices.enumerated().map { (i, index) in
+    (name: "pivot", frame: index, mirror: (5...11).contains(i))
+}
+func pivotPose(_ name: String, _ frame: Int, _ mirror: Bool, transparent: Bool = false) -> CGImage {
     let clip = clips[name]!
     let url = folder.appendingPathComponent(clip.atlas + ".png")
     let atlas = CGImageSourceCreateImageAtIndex(CGImageSourceCreateWithURL(url as CFURL, nil)!, 0, nil)!
-    return aligned(atlas, clip.frames[clip.pivotFrame!], clip.scale, mirror: mirror, transparent: transparent)
+    return aligned(atlas, clip.frames[frame], clip.scale, mirror: mirror, transparent: transparent)
 }
 // Vision can match similar curls on different sides of a silhouette. Constrain
 // the upper-body flow by the span of opaque fur at each corresponding height.
@@ -215,9 +213,9 @@ func constrainTurn(_ source: Silhouette, _ target: Silhouette, tile t: Int, chan
         }
     }
 }
-let silhouettes = directions + [("wag",false),("wag",true)]
-let outlines = silhouettes.map { Silhouette(pivotPose($0.name,$0.mirror,transparent:true)) }
-let pivots = directions.map { pivotPose($0.name, $0.mirror) }
+let silhouettes = directions + [("wag",3,false),("wag",3,true)]
+let outlines = silhouettes.map { Silhouette(pivotPose($0.name,$0.frame,$0.mirror,transparent:true)) }
+let pivots = directions.map { pivotPose($0.name, $0.frame, $0.mirror) }
 for i in pivots.indices {
     let next = (i + 1) % pivots.count
     try bakePair("pivot/\(i)/\(next)", pivots[i], pivots[next])
@@ -225,7 +223,7 @@ for i in pivots.indices {
     constrainTurn(outlines[next],outlines[i],tile:tile-1,channel:2)
 }
 for i in [10, 14] {
-    try bakePair("pivot/\(i)/wag", pivots[i], pivotPose("wag", directions[i].mirror))
+    try bakePair("pivot/\(i)/wag", pivots[i], pivotPose("wag", 3, directions[i].mirror))
     let wag = directions[i].mirror ? 17 : 16
     constrainTurn(outlines[i],outlines[wag],tile:tile-1,channel:0)
     constrainTurn(outlines[wag],outlines[i],tile:tile-1,channel:2)

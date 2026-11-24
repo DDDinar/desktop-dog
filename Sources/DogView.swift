@@ -29,13 +29,15 @@ final class DogWindow: NSWindow {
 
 final class DogView: NSView {
     private let photoView: PhotoSurface?
-    private let groundShadow = NSGradient(colors: [
+    private static let groundShadow = NSGradient(colors: [
         NSColor.black.withAlphaComponent(0.22), NSColor.black.withAlphaComponent(0)
     ])
     private var bathroomEffect: BathroomEffect?
     private var wasSleeping = false
     private var sleepPhase = 0.0
     private var jumpHeight: CGFloat = 0
+    private var roamingScale: CGFloat?
+    private var floorOffset: CGPoint = .zero
     private var lastRenderedPose: Pose?
     private var renderElapsed: TimeInterval = 0
 
@@ -57,30 +59,47 @@ final class DogView: NSView {
 
     func prepareRoaming() { photoView?.prepareRoaming() }
 
+    func suspendRoaming() {
+        roamingScale = nil
+        lastRenderedPose = nil
+        renderElapsed = 0
+    }
+
     func display(_ dog: Dog, dt: TimeInterval, bedFrame: BedLife.Sample? = nil) {
         if let bedFrame {
-            if wasSleeping || jumpHeight != 0 || bathroomEffect != nil {
+            if wasSleeping || jumpHeight != 0 || bathroomEffect != nil || floorOffset != .zero {
+                floorOffset = .zero
                 bathroomEffect = nil
                 wasSleeping = false
                 sleepPhase = 0
                 jumpHeight = 0
                 needsDisplay = true
             }
-            lastRenderedPose = nil
-            renderElapsed = 0
+            suspendRoaming()
             photoView?.updateBed(bedFrame)
             return
+        }
+        let scale = bounds.width / DogWindow.size.width
+        if roamingScale != scale {
+            // Discard contacts from the previous scale or from before occlusion.
+            photoView?.resumeRoaming()
+            roamingScale = scale
         }
         renderElapsed += dt
         // Keep the walk and chase responsive. Breathing and a settled tail
         // need fewer updates when the dog is resting.
-        let resting = dog.pose == .sleep || dog.pose == .lie || (dog.pose == .stand && dog.joy < 0.02)
+        let quietStand = dog.pose == .stand && dog.joy < 0.02 && photoView?.isSettledStanding == true
+        let resting = dog.pose == .sleep || dog.pose == .lie || quietStand
         if dog.pose == lastRenderedPose, resting, renderElapsed < 1.0 / 26.0 { return }
         lastRenderedPose = dog.pose
         let animationStep = renderElapsed
         renderElapsed = 0
-        let scale = bounds.width / DogWindow.size.width
-        photoView?.update(dog, dt: animationStep, scale: scale)
+        if let window {
+            let local = convert(window.convertPoint(fromScreen: dog.position), from: nil)
+            floorOffset = CGPoint(x: local.x / scale - DogWindow.size.width / 2,
+                                  y: local.y * DogWindow.size.height / bounds.height - DogWindow.groundMargin)
+        }
+        photoView?.update(dog, dt: animationStep, scale: scale, offset: floorOffset)
 
         let effect = BathroomEffect(dog)
         if bathroomEffect != effect {
@@ -99,19 +118,23 @@ final class DogView: NSView {
         }
     }
 
+    static func drawGroundShadow(in ctx: CGContext, height: CGFloat) {
+        let shadowScale = 1 - min(height / 280, 0.32)
+        ctx.saveGState()
+        ctx.scaleBy(x: shadowScale, y: 0.28 * shadowScale)
+        groundShadow?.draw(fromCenter: .zero, radius: 3, toCenter: .zero,
+                           radius: 66, options: [.drawsBeforeStartingLocation])
+        ctx.restoreGState()
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         let s = bounds.width / DogWindow.size.width
         ctx.saveGState()
         ctx.scaleBy(x: s, y: s)
-        ctx.translateBy(x: DogWindow.size.width / 2, y: DogWindow.groundMargin)
-        let shadowScale = 1 - min(jumpHeight / 280, 0.32)
-        ctx.saveGState()
-        ctx.scaleBy(x: shadowScale, y: 0.28 * shadowScale)
-        groundShadow?.draw(fromCenter: .zero, radius: 3, toCenter: .zero,
-                           radius: 66, options: [.drawsBeforeStartingLocation])
-        ctx.restoreGState()
+        ctx.translateBy(x: DogWindow.size.width / 2 + floorOffset.x, y: DogWindow.groundMargin + floorOffset.y)
+        Self.drawGroundShadow(in: ctx, height: jumpHeight)
         bathroomEffect?.draw(in: ctx)
         ctx.restoreGState()
 

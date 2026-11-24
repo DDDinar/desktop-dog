@@ -11,11 +11,6 @@ motion = Path(__file__).resolve().parents[1] / "Assets/Photo/Motion"
 # chest, for head-on views); the lowest fully visible paw defines the floor.
 # The jump moves right within its atlas, so register its torso in every cell.
 clips = {
-    "side": ("Side", 2, 0, 0.401, 231),
-    "near": ("Near", 2, 0, 0.397, 240),
-    "far": ("Far", 2, 0, 0.380, 229),
-    "front": ("Axial", 4, 0, 0.416, 169),
-    "back": ("Axial", 4, 2, 0.409, 171),
     "trot": ("Action", 4, 0, 0.578, 166),
     "jump": ("Action", 4, 2, 0.578, (128, 131, 147, 171, 187, 188, 178, 166)),
     "wag": ("Wag", 2, 0, 0.329, 230),
@@ -46,21 +41,6 @@ for name, (atlas, rows, first_row, scale, pivot_x) in clips.items():
             frames.append([x, y, x + 362, y + 330, x + 182, y + 320])
     registered[name] = dict(atlas=atlas, scale=scale, frames=frames)
 
-# The turnaround sheet has wider transparent gutters between rows.
-sheet = Image.open(motion / "TurnViews.png").getchannel("A")
-solid = sheet.point(lambda x: 255 if x > 38 else 0)
-rows = [0, 344, 650, 945, sheet.height]
-columns = [0, 299, 594, 889, sheet.width]
-for row, (name, scale) in enumerate([("frontTilt", .39), ("nearSide", .46),
-                                     ("rearSide", .48), ("backTilt", .36)]):
-    frames = []
-    for col in range(4):
-        x, y, r, b = columns[col], rows[row], columns[col+1], rows[row+1]
-        left, top, right, bottom = solid.crop((x,y,r,b)).getbbox()
-        bounds = [max(x,x+left-4), max(y,y+top-4), min(r,x+right+4), min(b,y+bottom+4)]
-        frames.append(bounds + [x+(left+right)//2, y+bottom-2])
-    registered[name] = dict(atlas="TurnViews", scale=scale, frames=frames)
-
 # The first pose is an exact copy of wag frame 3. The two actions share
 # their standing pose. Register the near forepaw at a fixed ground point.
 ready = [75, 544, 435, 960, 244, 952]
@@ -76,10 +56,35 @@ for name, cells in [("urinate", [(0, 0, 343), (1, 0, 343), (2, 0, 345)]),
         frames.append([x+l-4, y+t-4, x+r+4, y+b+4, x+forepaw-26, y+449])
     registered[name] = dict(atlas="Breaks", scale=registered["wag"]["scale"], frames=frames)
 
-# Balanced support poses shared by the turn solver and the optical-flow baker.
-for name, frame in dict(side=4, rearSide=1, far=3, backTilt=2, back=2, frontTilt=2,
-                        near=0, nearSide=3, front=2, wag=3, trot=6).items():
-    registered[name]["pivotFrame"] = frame
+# Nine poses from a single photographic turnaround. The paws are measured at
+# their pads in the source cell. Order: right fore, left fore, right hind,
+# left hind. Hidden paws share the ground rig but do not warp visible fur.
+turn_toes = [
+    [(215,382,1),(267,374,1),(175,344,1),(243,336,0)],
+    [(202,382,1),(251,373,1),(131,343,1),(173,334,0)],
+    [(230,382,1),(269,371,1),(103,348,1),(171,335,1)],
+    [(246,380,1),(275,366,1),(86,352,1),(149,337,1)],
+    [(269,368,1),(281,353,1),(62,359,1),(84,340,1)],
+    [(291,352,1),(237,342,1),(130,377,1),(85,357,1)],
+    [(281,368,1),(219,362,1),(170,400,1),(105,384,1)],
+    [(259,361,1),(179,346,0),(219,401,1),(140,392,1)],
+    [(243,358,0),(203,353,1),(241,401,1),(166,397,1)],
+]
+sheet = Image.open(motion / "Pivot.png").getchannel("A")
+scale = 0.344
+frames, toes = [], []
+for i, contacts in enumerate(turn_toes):
+    x, y = (i % 3)*426, [0,400,798][i // 3]
+    rect = (x,y,x+426,[400,798,1230][i // 3])
+    left, top, right, bottom = sheet.crop(rect).point(lambda a: 255 if a>38 else 0).getbbox()
+    # The common ground origin is between the four feet. The projection of
+    # the support polygon changes with yaw, while its centre stays put.
+    cx = round(sum(q[0] for q in contacts) / 4)
+    cy = round(sum(q[1] for q in contacts) / 4) + 13
+    frames.append([x+left-4,y+top-4,x+right+4,y+bottom+4,x+cx,y+cy])
+    toes.append([v for tx,ty,visible in contacts
+                 for v in (round((tx-cx)*scale,3),round((ty-cy)*scale,3),visible)])
+registered["pivot"] = dict(atlas="Pivot", scale=scale, frames=frames, toes=toes)
 
 with (motion / "Atlas.json").open("w", encoding="utf-8") as out:
     json.dump(registered, out, separators=(",", ":"), indent=1)
