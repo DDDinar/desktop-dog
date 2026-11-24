@@ -15,57 +15,72 @@ from PIL import Image
 MOTION = Path(__file__).resolve().parents[1] / "Assets/Photo/Motion"
 STRIDE = 48.0
 SUPPORT = 0.64
+TROT_STRIDE = 68.0
+TROT_SUPPORT = 0.54
+TROT_BANDS = [(0.60, 20), (1.0, 36)]
 DEPTH = 0.52
 RISE = math.sqrt(1 - DEPTH**2)
 # Partial loads need fewer samples. Full stride has one exposure per point travelled.
 BANDS = [(0.32, 12), (0.65, 24), (1.0, 48)]
-# Measured in half-resolution coordinates within each source cell. The first curve
-# follows the underside of the chest and hips. For the two closest visible limbs,
-# cross-sections give the left and right edges from root to sole. Overlapped far
-# limbs are reconstructed with the same coat, at their own registered ground point.
+# Half-resolution coordinates in each photographic exposure. Curves follow the
+# belly and the actual edges of each visible limb, from its root to its toes.
+# Order within a view is right fore, left fore, right hind, left hind. Where a
+# paw is occluded its counterpart provides the overlapping patch of coat.
 RIGS = [
-    ([(68,124),(85,128),(105,140),(124,143),(144,139),(160,129)],
-     [(93,123,108),(91,122,137),(92,119,163),(94,122,181),(96,123,187),(101,120,191)],
-     [(78,105,105),(79,101,129),(82,96,151),(81,95,166),(82,95,170),(85,92,172)]),
-    ([(48,115),(62,117),(77,119),(96,141),(123,137),(142,124),(155,119)],
-     [(76,113,106),(80,111,138),(83,109,159),(87,113,179),(89,119,187),(97,112,191)],
-     [(54,83,95),(54,80,119),(54,77,142),(54,77,160),(53,78,169),(59,73,172)]),
-    ([(34,108),(51,111),(72,116),(84,128),(104,133),(126,137),(151,122),(170,116)],
-     [(86,132,99),(94,126,134),(97,124,153),(99,124,173),(101,131,186),(108,127,191)],
-     [(40,76,93),(43,70,118),(40,64,144),(40,62,162),(38,66,169),(45,62,174)]),
-    ([(20,106),(42,111),(62,117),(74,113),(88,121),(106,130),(133,133),(149,119),(164,114)],
-     [(85,131,95),(91,126,126),(96,125,147),(102,126,166),(105,134,181),(112,138,187),(117,133,190)],
-     [(30,70,86),(31,62,111),(31,55,137),(29,52,158),(29,56,171),(34,54,176)]),
-    ([(8,110),(28,111),(44,119),(63,113),(76,119),(99,125),(119,130),(142,128),(163,111)],
-     [(100,148,89),(103,141,116),(110,137,138),(113,138,157),(118,145,173),(124,152,180),(131,146,184)],
-     [(15,63,87),(18,54,112),(16,49,135),(13,40,155),(15,40,170),(19,45,177),(26,42,181)]),
-    ([(24,115),(40,122),(58,130),(76,121),(88,117),(105,124),(126,127),(150,113),(172,108)],
-     [(125,163,92),(126,156,120),(129,152,143),(129,151,159),(132,160,169),(136,161,173),(141,157,176)],
-     [(49,91,91),(53,86,118),(49,80,143),(46,74,164),(47,79,179),(52,83,185),(60,75,189)]),
-    ([(32,123),(50,132),(78,141),(98,138),(116,128),(136,128),(158,113),(177,106)],
-     [(124,160,100),(123,157,126),(125,151,149),(124,149,168),(126,155,178),(132,154,182),(137,147,185)],
-     [(70,114,102),(70,106,132),(68,99,155),(67,96,174),(69,100,190),(72,102,196),(80,97,200)]),
-    ([(48,125),(63,137),(84,143),(105,147),(125,136),(143,124),(154,116)],
-     [(117,152,98),(121,146,123),(124,141,143),(123,139,161),(123,142,174),(128,140,179),(131,137,181)],
-     [(85,130,104),(88,125,133),(89,121,153),(92,123,175),(94,125,189),(96,126,195),(103,121,200)]),
-    ([(54,124),(74,141),(98,146),(116,146),(135,142),(149,122)],
-     [(85,122,102),(86,117,129),(88,113,150),(92,111,168),(96,110,175),(100,108,177)],
-     [(102,144,102),(105,140,131),(105,138,155),(107,136,176),(106,137,190),(108,137,197),(116,130,201)]),
+    ([(66,119),(78,137),(90,142),(101,136),(110,137),(119,144),(130,132),(137,117)],
+     [(73,103,111),(75,101,139),(78,100,162),(78,99,177),(77,100,188),(83,97,193)],
+     [(103,132,112),(102,130,137),(104,128,162),(105,128,177),(105,130,189),(111,125,194)],
+     [(70,90,108),(72,87,133),(71,82,152),(68,81,166),(72,80,171)], None),
+    ([(48,108),(59,118),(69,113),(78,118),(86,132),(102,141),(117,140),(131,133),(141,117)],
+     [(74,105,104),(77,102,133),(79,101,155),(80,101,176),(79,105,189),(85,100,194)],
+     [(105,140,110),(107,136,136),(109,131,156),(109,131,173),(112,136,186),(117,132,191)],
+     [(50,72,93),(50,69,119),(50,66,145),(50,65,159),(47,66,167),(52,64,170)],None),
+    ([(36,105),(49,115),(61,112),(70,120),(82,119),(95,132),(110,139),(123,137),(140,126),(150,117)],
+     [(89,117,98),(90,116,127),(91,114,151),(92,114,173),(93,118,189),(98,114,194)],
+     [(117,150,102),(117,145,127),(117,140,149),(119,138,169),(120,144,185),(126,140,191)],
+     [(39,65,92),(39,62,117),(38,56,140),(35,51,158),(34,54,167),(39,51,171)],
+     [(62,88,99),(65,87,119),(65,82,140),(65,80,155),(67,88,166),(73,86,170)]),
+    ([(26,106),(41,117),(53,114),(62,117),(73,120),(83,124),(96,130),(113,136),(131,134),(144,123),(151,116)],
+     [(87,120,99),(90,116,125),(92,114,148),(93,113,170),(94,119,186),(98,119,192)],
+     [(114,147,103),(113,141,129),(115,137,152),(116,134,168),(118,141,181),(124,138,187)],
+     [(29,60,95),(29,54,117),(28,46,141),(26,42,157),(25,46,171),(31,44,176)],
+     [(55,83,95),(55,80,121),(54,74,141),(54,70,156),(57,79,168),(64,77,171)]),
+    ([(18,106),(35,120),(52,112),(64,115),(76,116),(92,124),(103,129),(118,133),(133,131),(150,112)],
+     [(97,141,95),(100,136,124),(104,133,146),(106,131,166),(108,135,185),(115,134,192)],
+     None,  # The near wrist covers the distant foreleg in profile.
+     [(22,57,94),(21,51,117),(18,43,141),(14,34,159),(16,36,170),(17,43,178),(18,42,182),(23,40,184)],
+     [(39,69,96),(41,65,119),(38,59,143),(35,52,158),(38,57,170),(44,55,177)]),
+    ([(31,110),(43,122),(57,131),(70,129),(84,119),(96,119),(108,125),(122,131),(141,126),(151,115)],
+     [(120,157,100),(123,153,124),(127,147,146),(129,145,163),(129,154,178),(136,150,184)],
+     [(98,129,101),(103,129,127),(107,128,147),(106,126,161),(107,131,174),(114,128,178)],
+     [(48,87,96),(49,80,125),(47,71,147),(47,65,165),(49,75,184),(55,75,193)],
+     [(33,58,95),(33,56,124),(28,49,146),(26,44,166),(27,48,179),(33,47,184)]),
+    ([(34,123),(52,132),(67,139),(82,144),(97,137),(111,132),(127,134),(141,126),(154,112)],
+     [(124,155,105),(123,152,133),(124,147,155),(124,144,173),(126,151,187),(132,148,192)],
+     [(97,126,108),(98,124,135),(99,117,157),(98,115,172),(99,119,183),(104,116,187)],
+     [(64,104,108),(67,100,138),(66,91,162),(64,87,179),(68,88,197),(73,99,204),(78,96,210)],
+     [(41,69,108),(40,67,138),(34,58,161),(33,52,180),(35,56,196),(41,55,202)]),
+    ([(46,125),(59,139),(73,138),(86,142),(101,147),(115,138),(129,131),(142,117)],
+     [(118,149,105),(119,147,132),(118,142,153),(119,139,170),(119,143,183),(126,140,190)],None,
+     [(83,123,108),(86,120,136),(87,116,158),(86,110,180),(88,110,199),(91,115,206),(97,111,210)],
+     [(53,84,110),(53,82,138),(50,75,159),(50,69,181),(50,69,199),(52,73,205),(58,70,207)]),
+    ([(66,125),(78,137),(89,144),(102,148),(116,146),(128,140),(134,125)],
+     [(94,114,107),(94,113,136),(94,110,157),(92,108,175),(90,106,184),(95,103,188)], None,
+     [(105,135,107),(108,135,137),(109,130,159),(109,130,180),(110,131,199),(110,135,206),(117,130,210)],
+     [(66,97,107),(67,96,136),(70,94,158),(71,90,180),(70,89,199),(67,90,206),(73,86,209)]),
 ]
 
-
-# Tail plume and cheek centres, followed by the base of the tail and neck.
-# The coordinates use the same half-resolution photograph as the limb guides.
+# Tail tip / cheek centre followed by the base of the tail / neck.
 UPPER_BODY = [
-    (None,                  (119,58,115,98)),
-    ((79,31,79,66),         (126,59,119,96)),
-    ((65,32,65,66),         (141,59,123,98)),
-    ((55,34,50,65),         (148,58,130,96)),
-    ((44,34,40,66),         (165,55,141,91)),
-    ((56,39,53,72),         (157,53,134,89)),
-    ((65,54,61,88),         (139,48,123,91)),
-    ((88,59,81,93),         None),
-    ((102,64,100,97),       None),
+    (None,                (105,59,106,100)),
+    ((75,43,62,63),      (128,59,117,97)),
+    ((65,44,48,67),      (151,59,123,96)),
+    ((54,45,34,76),      (152,59,127,94)),
+    ((49,44,23,78),      (162,61,132,94)),
+    ((44,44,35,81),      (156,58,136,94)),
+    ((56,57,45,92),      (143,59,126,99)),
+    ((72,57,61,99),      None),
+    ((95,65,95,104),     None),
 ]
 
 
@@ -78,21 +93,24 @@ def smooth(x):
     return t*t*(3-2*t)
 
 
-def articulation(phase, strength, hind, height):
+def articulation(phase, strength, hind, height, trot=False):
     # Positive F points to the muzzle; positive H points up.
-    if phase < SUPPORT:
-        advance = STRIDE * (SUPPORT/2 - phase)
+    support = TROT_SUPPORT if trot else SUPPORT
+    stride = TROT_STRIDE if trot else STRIDE
+    if phase < support:
+        advance = stride * (support/2 - phase)
         swing = 0
     else:
-        t = (phase-SUPPORT)/(1-SUPPORT)
-        advance = STRIDE * (SUPPORT/2-phase + t**3*(10-15*t+6*t*t))
+        t = (phase-support)/(1-support)
+        advance = stride * (support/2-phase + t**3*(10-15*t+6*t*t))
         swing = math.sin(math.pi*t)**2
-    toe_motion = np.array([advance, (8.8 if hind else 6.7)*swing])*strength
+    lift = (13.5 if hind else 10.8) if trot else (8.8 if hind else 6.7)
+    toe_motion = np.array([advance, lift*swing])*strength
     rest = np.array([(0,55),(14,31),(-8,13),(-3,0)] if hind else
                     [(0,55),(-11,31),(0,10),(3,0)], dtype=float) * height/55
     toe = rest[3] + toe_motion
     lower = rest[2]-rest[3]
-    tilt = strength*(0.08*advance/(STRIDE/2) + (0.36 if hind else 0.49)*swing)
+    tilt = strength*(0.08*advance/(stride/2) + (0.36 if hind else 0.49)*swing)
     rot = np.array([[math.cos(tilt),-math.sin(tilt)],[math.sin(tilt),math.cos(tilt)]])
     hock = toe + rot@lower
     root = rest[0].copy()
@@ -159,7 +177,7 @@ class View:
         self.texture[:,:,:3]*=self.texture[:,:,3:4]/255
         h,w=self.texture.shape[:2]
         Y,X=np.mgrid[:h,:w].astype(float)/2
-        belly,fore,hind=RIGS[i]
+        belly,*limbs=RIGS[i]
         envelope=interp(belly,X)
         # Keep small tufts along the newly revealed underside.
         grain=np.sin(X*1.7+0.9*np.sin(X*2.4))*0.8 + np.sin(X*.35)*1.4
@@ -168,20 +186,21 @@ class View:
         self.pivot=np.array(f[4:6])-self.cell
         self.feet=np.array(clip["toes"][i],dtype=float).reshape(4,3)
         self.legs=[]
-        for data in (fore,hind):
+        for leg, data in enumerate(limbs):
+            if data is None:
+                self.legs.append(self.legs[leg-1])
+                continue
             lo,hi,heights=np.array(data).T
             left=np.interp(Y,heights,lo);right=np.interp(Y,heights,hi)
-            mask=smooth((X-left+0.65)/1.2)*smooth((right-X+0.65)/1.2)
-            mask*=smooth((Y-heights[0]+3)/17)*smooth((heights[-1]+0.7-Y)/1.2)
+            mask=smooth((X-left+2.1)/2.3)*smooth((right-X+2.1)/2.3)
+            mask*=smooth((Y-heights[0]+3)/17)*smooth((heights[-1]+1.7-Y)/2.0)
             skin=self.texture*mask[:,:,None]
-            # A cropped near-side leg supplies its obscured counterpart too.
-            # Ground points and lengths differ; only fur comes from the same exposure.
+            # Use this particular limb’s own fur and measured ground point.
             ys=np.array([heights[0]+1,heights[0]+(heights[-1]-heights[0])*.43,
                          heights[-1]-(heights[-1]-heights[0])*.22,heights[-1]-3])
             xs=np.interp(ys,heights,(lo+hi)/2)
             toes=np.stack([xs,ys],axis=1)
             source = toes*2
-            leg = 0 if len(self.legs)==0 else 2
             source[-1] = self.pivot+self.feet[leg,:2]/clip['scale']
             self.legs.append((skin,np.vstack([source,source[-1]+[13,0]])))
         self.nominal=np.array(f[:4])-np.tile(self.cell,2)
@@ -229,28 +248,30 @@ class View:
             sy = sy + head[2]*0.55*shift[1]
         return sample(self.body,sx,sy)
 
-    def render(self, phase, strength):
+    def render(self, phase, strength, trot=False, jump_motion=None):
         angle=self.angle; project=np.array([[math.cos(angle),0],[-DEPTH*math.sin(angle),-RISE]])
-        bob=0.7*math.cos(4*math.pi*(phase-.04))*strength
+        bob=(1.6 if trot else 0.7)*math.cos(4*math.pi*(phase-.04))*strength
         sway=0.7*math.sin(2*math.pi*phase)*strength
         shift=np.array([sway*math.sin(angle),bob+sway*math.cos(angle)*DEPTH])/self.zoom
         pose=[None]*4
         # Fore and hind legs on a side touch down a quarter-cycle apart.
-        offsets=(.25,.75,0,.5)
+        offsets=(0,.5,.5,0) if trot else (.25,.75,0,.5)
         for leg,offset in enumerate(offsets):
             hind=leg>=2; far=leg%2==1
-            texture,src=self.legs[int(hind)]
+            texture,src=self.legs[leg]
             toe=self.pivot+self.feet[leg,:2]/self.zoom
-            depth=.90 if far else 1.
+            borrowed = far and self.legs[leg] is self.legs[leg-1]
+            depth=.88 if borrowed else 1.
             # Keep the soles on their measured ground plane.
             base=toe+(src-src[3])*depth
-            if far:
+            if borrowed:
                 # Both shoulder blades and hips remain inside the trunk, even
                 # where the distant toe is laterally offset in a frontal view.
                 base[0,0] = .65*src[0,0] + .35*base[0,0]
                 base[1,0] = .22*src[1,0] + .78*base[1,0]
             height=max(30,(src[3,1]-src[0,1])*depth*self.zoom/RISE)
-            delta=articulation((phase-offset)%1, strength, hind, height)
+            delta=(jump_motion(leg,height) if jump_motion is not None else
+                   articulation((phase-offset)%1, strength, hind, height,trot))
             motion=delta@project.T/self.zoom
             target=base.copy();target[:4]+=motion;target[4]+=motion[3]
             target[0]+=shift; target[1]+=0.42*shift
@@ -267,7 +288,7 @@ class View:
             if len(xx)==0 or len(yy)==0:continue
             q=np.s_[yy[0]:yy[-1]+1,xx[0]:xx[-1]+1]
             painted=warp_limb(texture,src,target,self.X[q],self.Y[q])
-            if leg%2==1:painted[:,:,:3]*=.94
+            if leg%2==1 and self.legs[leg] is self.legs[leg-1]:painted[:,:,:3]*=.92
             pix[q]=over(pix[q],painted)
         chest=self.coat(phase,strength,shift)
         pix*=np.minimum(1,self.upperMask+chest[:,:,3]/255)[:,:,None]
@@ -285,6 +306,9 @@ def bake():
     for i in indices:
         v=View(i,sheet,clip)
         poses = [v.render(k/n, strength) for strength, n in BANDS for k in range(n)]
+        walk_count = len(poses)
+        poses.extend(v.render(k/n, strength, trot=True)
+                     for strength,n in TROT_BANDS for k in range(n))
         # A fixed cropped cell preserves registration and keeps unused transparent
         # texels out of the GPU's working set. Two gutter texels isolate neighbours.
         limits = np.array([image.getchannel("A").getbbox() for image,_ in poses])
@@ -301,7 +325,10 @@ def bake():
             toes.append(np.round(feet,3).flatten().tolist())
         name="Walk"+str(i)
         atlas.save(dest/(name+".png"),compress_level=7)
-        manifest["walk"+str(i)]=dict(atlas=name,scale=v.pixel_scale,frames=frames,toes=toes)
+        manifest["walk"+str(i)]=dict(atlas=name,scale=v.pixel_scale,
+                                     frames=frames[:walk_count],toes=toes[:walk_count])
+        manifest["run"+str(i)]=dict(atlas=name,scale=v.pixel_scale,
+                                    frames=frames[walk_count:],toes=toes[walk_count:])
         print(name,atlas.size,flush=True)
     (dest/"Walk.json").write_text(json.dumps(manifest,separators=(",",":"))+"\n")
 

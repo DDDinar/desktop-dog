@@ -16,10 +16,10 @@ cp "$root/Info.plist" "$bundle/Contents/Info.plist"
 photos="$bundle/Contents/Resources/Photo"
 mkdir -p "$photos/Motion"
 cp "$root/Assets/Photo/"{Portraits,Rest}.png "$photos/"
-cp "$root/Assets/Photo/Motion/"{Action,Wag,Breaks,Pivot}.png "$photos/Motion/"
+cp "$root/Assets/Photo/Motion/"{Breaks,Pivot,Leap}.png "$photos/Motion/"
 swift "$root/Tools/pack_bed.swift" "$root/Assets/Photo/Motion/Bed.png" "$root/Assets/Photo/Motion/Gestures.png" "$photos/Motion/Bed.png"
 cp "$root/Assets/Photo/Motion/Walk"{0..8}.png "$photos/Motion/"
-cp "$root/Assets/Photo/Motion/"{Atlas.json,Walk.json,Flow.json,Flow.rgba} "$photos/Motion/"
+cp "$root/Assets/Photo/Motion/"{Atlas.json,Walk.json,Leap.json,Flow.json,Flow.rgba} "$photos/Motion/"
 if [[ -f "$root/Assets/DesktopDog.icns" ]]; then
   cp "$root/Assets/DesktopDog.icns" "$bundle/Contents/Resources/"
 fi

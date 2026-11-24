@@ -149,12 +149,21 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
         if let job = pendingWalk, job.completion.wait(timeout: .now()) == .success {
             finishLoading(job)
         }
-        if case let .walk(target, _) = dog.activity, pendingWalk == nil {
-            let dx = target.x - dog.position.x, dy = target.y - dog.position.y
-            let heading = atan2(dy / Dog.cameraDepth, dx)
-            let name = animation.walkAtlas(for: heading)
-            if atlases[name] == nil, let device, let url = atlasURLs[name] {
-                pendingWalk = PendingWalkAtlas(name: name, url: url, device: device, queue: queue)
+        if pendingWalk == nil {
+            let heading: CGFloat?
+            switch dog.activity {
+            case let .walk(target, _):
+                heading = atan2((target.y-dog.position.y)/Dog.cameraDepth, target.x-dog.position.x)
+            case .chase, .jump:
+                heading = dog.heading
+            default:
+                heading = nil
+            }
+            if let heading {
+                let name = animation.walkAtlas(for: heading)
+                if atlases[name] == nil, let device, let url = atlasURLs[name] {
+                    pendingWalk = PendingWalkAtlas(name:name,url:url,device:device,queue:queue)
+                }
             }
         }
         let frame = animation.frame(for: dog, dt: dt, windowScale: scale)
@@ -270,7 +279,7 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
             let secondBounds = bounds(turn.target, interpolated: true)
             b = union(b, bounds(turn.target))
             uniforms += parameters(turn.target)
-            uniforms += [SIMD4(Float(turn.angularTile ?? 0),turn.angularTile == nil ? 0 : turn.angularWeight,0,turn.amount),
+            uniforms += [SIMD4(Float(turn.angularTile ?? 0),turn.angularTile == nil ? 0 : turn.angularWeight,turn.angularTile == nil ? 0 : 1,turn.amount),
                          SIMD4(frame.mirror,turn.target.mirror,Float(turn.outlines.x),Float(turn.outlines.y)), firstBounds, secondBounds,
                          SIMD4(frame.nose.x*frame.mirror,frame.nose.y,turn.target.nose.x*turn.target.mirror,turn.target.nose.y)]
             var firstContacts = contactParameters(frame)
@@ -285,7 +294,16 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
                 let delta = SIMD2(p.z-p.x,p.w-p.y)
                 maxShiftSquared = max(maxShiftSquared,simd_length_squared(delta))
             }
-            uniforms += [SIMD4(frame.mirror,maxShiftSquared,0,0)] + contactParameters(frame)
+            // The tail rotates around its attachment in the same exposure as the torso.
+            // Reserve enough space to rasterize it outside the neutral outline.
+            if frame.wagAngle != 0 {
+                let guide = frame.tailGuide
+                let reach = abs(frame.wagAngle)*simd_distance(SIMD2(guide.x,guide.y), SIMD2(guide.z,guide.w))
+                b.x -= reach
+                b.z += reach
+                b.y -= reach
+            }
+            uniforms += [SIMD4(frame.mirror,maxShiftSquared,frame.wagAngle,0), frame.tailGuide] + contactParameters(frame)
             encoder.setRenderPipelineState(pipeline)
         }
         for pin in frame.pawPins {
@@ -423,14 +441,27 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
         float2 pos = p.uv;
         if (u[4].y>0.01 && pos.y > -80) {
             if (u[4].y<4.0) {
-                pos=subframeOffset(pos,u+5);
+                pos=subframeOffset(pos,u+6);
             } else {
                 float4 pins[4];
-                for (int i=0;i<4;i++) pins[i]=u[6+i];
-                pos=plant(pos,u[5],pins);
+                for (int i=0;i<4;i++) pins[i]=u[7+i];
+                pos=plant(pos,u[6],pins);
             }
         }
-        return gait(pos*float2(u[4].x,1),max(length(dfdx(p.uv)),length(dfdy(p.uv))),atlas,flow,u);
+        pos.x *= u[4].x;
+        if (u[4].z != 0) {
+            float2 root = u[5].zw, stem = u[5].xy-root;
+            float lengthSq = max(1.0,dot(stem,stem));
+            float2 q = pos-root;
+            float along = dot(q,stem)/lengthSq;
+            float across = length(q-stem*clamp(along,0.0,1.0));
+            float radius = sqrt(lengthSq);
+            float influence = smoothstep(0.0,0.65,along)*(1-smoothstep(0.52,1.1,across/radius));
+            float angle = -u[4].z*influence;
+            float c = cos(angle), s = sin(angle);
+            pos = root + float2(c*q.x-s*q.y,s*q.x+c*q.y);
+        }
+        return gait(pos,max(length(dfdx(p.uv)),length(dfdy(p.uv))),atlas,flow,u);
     }
     float mapInterval(float v,float lo,float hi,float a,float b) {
         return a+(v-lo)*(b-a)/max(hi-lo,0.4);
@@ -470,6 +501,32 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
         float4 values=atlas.sample(linear,uv+float2((tile%8)*108,(tile/8)*100));
         return (values[component%4]*255.0-128.0)*0.25;
     }
+    // Signed distance to the actual fur and paw outlines of a moving exposure.
+    // Only boundary pixels shared with transparent space require extra samples.
+    float movingEdge(texture2d<float> atlas, float2 local, float mirror, float alpha,
+                     float pixelWidth, constant float4 *pose) {
+        float scale = pose[1].x;
+        float2 p = local*float2(mirror,1)/scale+pose[0].xy;
+        float lod = log2(pixelWidth/scale);
+        float sign = alpha>=0.5 ? 1.0 : -1.0;
+        if (abs(alpha-0.5)<0.45) return (alpha-0.5)*pixelWidth;
+        float radius = 12.0;
+        const float2 directions[8] = {float2(1,0),float2(-1,0),float2(0,1),float2(0,-1),
+            float2(.707,.707),float2(-.707,.707),float2(-.707,-.707),float2(.707,-.707)};
+        for (int i=0;i<8;i++) {
+            float previous = alpha, last = 0.0;
+            for (float r=1.5; r<=12.0 && last<radius; r*=2.0) {
+                float next = photo(atlas,p+directions[i]*r/scale,pose[2],lod).a;
+                if ((next-0.5)*sign<=0.0) {
+                    radius=min(radius,mix(last,r,(0.5-previous)/(next-previous)));
+                    break;
+                }
+                previous=next;
+                last=r;
+            }
+        }
+        return sign*radius;
+    }
     fragment float4 turn_fragment(PhotoPixel p [[stage_in]], texture2d<float> first [[texture(0)]],
             texture2d<float> stride [[texture(1)]], texture2d<float> second [[texture(2)]],
             constant float4 *u [[buffer(0)]]) {
@@ -480,19 +537,29 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
         float3 ay=float3(h.y,clamp(n.y,h.y+3,h.w-3),h.w);
         float3 by=float3(k.y,clamp(n.w,k.y+3,k.w-3),k.w);
         float3 mx=mix(ax,bx,t), my=mix(ay,by,t);
-        float2 a=turnPosition(p.uv,mx,my,ax,ay,t,u[8].y,int(u[8].x),false,stride,u+13);
-        float2 b=turnPosition(p.uv,mx,my,bx,by,1-t,u[8].y,int(u[8].x),true,stride,u+18);
+        // The muzzle and ears follow the measured flow even during acceleration.
+        // The lower body increasingly follows the gait's four registered feet.
+        float upper = 1.0-smoothstep(-75.0,-34.0,p.uv.y);
+        float opticalWeight = mix(u[8].y,u[8].z,upper);
+        float2 a=turnPosition(p.uv,mx,my,ax,ay,t,opticalWeight,int(u[8].x),false,stride,u+13);
+        float2 b=turnPosition(p.uv,mx,my,bx,by,1-t,opticalWeight,int(u[8].x),true,stride,u+18);
         float4 A = gait(a*float2(u[9].x,1),width,first,stride,u);
         float4 B = gait(b*float2(u[9].y,1),width,second,stride,u+4);
         float w=smoothstep(0.12,0.88,t);
         float4 color=mix(A,B,w);
-        if (u[8].y>0 && u[9].z>=0 && u[9].w>=0 && w>0 && w<1 && color.a>0.001) {
-            float edge=mix(outlineDistance(stride,a,int(u[9].z)),
-                           outlineDistance(stride,b,int(u[9].w)),w);
-            float aa=max(0.65,width*0.75);
-            float weight=u[8].y*smoothstep(0.0,0.17,min(w,1-w));
-            float alpha=mix(color.a,smoothstep(-aa,aa,edge),weight);
-            color*=alpha/color.a;
+        if (u[9].z>=0 && u[9].w>=0 && w>0 && w<1 && color.a>0.001) {
+            float edgeA=outlineDistance(stride,a,int(u[9].z));
+            float edgeB=outlineDistance(stride,b,int(u[9].w));
+            if (opticalWeight<0.999 && abs(A.a-B.a)>0.06) {
+                edgeA=mix(movingEdge(first,a,u[9].x,A.a,width,u),edgeA,opticalWeight);
+                edgeB=mix(movingEdge(second,b,u[9].y,B.a,width,u+4),edgeB,opticalWeight);
+            } else if (opticalWeight<0.999) {
+                return color;
+            }
+            float aa=max(0.58,width*0.72);
+            float alpha=smoothstep(-aa,aa,mix(edgeA,edgeB,w));
+            float weight=smoothstep(0.0,0.16,min(w,1-w));
+            color *= mix(color.a,alpha,weight)/color.a;
         }
         return color;
     }

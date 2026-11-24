@@ -1,29 +1,6 @@
 import Foundation
 import simd
 
-/// Toe landmarks in the floor coordinates of the registered photographs. Order is
-/// right fore, left fore, right hind, left hind. An occluded toe retains its
-/// expected ground position (for the other view), with 128 subtracted from y.
-enum PivotRegistration {
-    private static let toes: [String:[[Int]]] = [
-        "wag": Array(repeating:[8,0,33,-6,-48,-16,-15,-22],count:8),
-        "trot": [
-            [23,0,55,-11,-16,-1,-44,-9], [19,0,57,-8,-20,0,-50,-12],
-            [55,-11,14,-11,-45,0,-30,-143], [55,0,11,-12,-51,0,-17,-13],
-            [51,-1,23,-16,-55,-5,-19,-13], [26,0,50,-20,-30,-9,-47,-19],
-            [10,0,54,-7,-24,0,-52,-11], [24,-8,56,-15,-32,0,-51,-18]]
-    ]
-
-    static func points(_ clip: String, _ index: Int, mirror: Float) -> [SIMD3<Float>] {
-        guard let row = toes[clip]?[index] else { return [] }
-        return (0..<4).map { leg in
-            let i = 2 * (mirror > 0 ? leg : leg ^ 1)
-            let y = row[i+1]
-            return SIMD3(Float(row[i]) * mirror, Float(y < -100 ? y+128 : y), y < -100 ? 0 : 1)
-        }
-    }
-}
-
 /// A quiet pivot always has three supporting feet. Positions below are in
 /// desktop coordinates so a planted toe stays still as the window moves.
 struct PivotSteps {

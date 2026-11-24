@@ -49,7 +49,9 @@ struct MotionPreview {
         var dog = Dog(position: start, now: 0)
         let dt = 1.0 / 60
         let zoom = 1.5
-        for tick in 0..<840 {
+        var pointer = CGPoint.zero
+        var obstacle: [CGPoint] = []
+        for tick in 0..<1070 {
             // Right and left profiles, a diagonal, then a change of target mid-turn.
             switch tick {
             case 24: dog.activity = .walk(to: CGPoint(x: 590, y: 300), folder: nil)
@@ -58,11 +60,16 @@ struct MotionPreview {
             case 696: dog.activity = .walk(to: CGPoint(x: 342, y: 260), folder: nil)
             case 725: dog.activity = .walk(to: CGPoint(x: 603, y: 301), folder: nil)
             case 805: dog.activity = .stand(until: 30)
+            case 860:
+                let side: CGFloat = dog.position.x > 495 ? -1 : 1
+                pointer = CGPoint(x: dog.position.x + 205*side, y:dog.position.y+42)
+                obstacle = [CGPoint(x: dog.position.x+99*side, y:dog.position.y)]
+                dog.chase(now: Double(tick)*dt, forced:true)
             default: break
             }
-            dog.step(now: Double(tick)*dt, dt: dt, idle: 0, pointer: .zero,
-                     pointerOnScreen: false, pointerMoving: false, allowChase: false,
-                     bounds: fixedBounds, folders: [], scale: 1)
+            dog.step(now: Double(tick)*dt, dt: dt, idle: 0, pointer: pointer,
+                     pointerOnScreen: tick >= 860, pointerMoving: tick >= 860, allowChase: tick >= 860,
+                     bounds: fixedBounds, folders: obstacle, scale: 1)
             let desired = DogWindow.origin(at: dog.position, scale: 1)
             let origin = CGPoint(x: desired.x.rounded(), y: desired.y.rounded())
             let remainder = CGPoint(x: desired.x-origin.x, y: desired.y-origin.y)

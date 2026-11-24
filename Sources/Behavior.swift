@@ -8,7 +8,7 @@ enum Pose: Equatable {
     var strideLength: CGFloat {
         switch self {
         case .walk: return 48
-        case .run: return 52
+        case .run: return 68
         default: return 0
         }
     }
@@ -408,10 +408,20 @@ struct Dog {
         return false
     }
 
+    // When either half-turn is equally short, bring the muzzle past the viewer.
+    // This also gives left and right reversals a consistent choice at ±π.
+    static func turnAngle(from heading: CGFloat, to bearing: CGFloat) -> CGFloat {
+        let delta = bearing-heading
+        let shortest = atan2(sin(delta),cos(delta))
+        if abs(shortest) > .pi-0.12 && abs(cos(heading)) > 0.72 && shortest*cos(heading) > 0 {
+            return shortest - copysign(2 * .pi, shortest)
+        }
+        return shortest
+    }
+
     @discardableResult
     private mutating func turn(toward bearing: CGFloat, maxChange: CGFloat) -> CGFloat {
-        let delta = bearing - heading
-        let error = atan2(sin(delta), cos(delta))
+        let error = Self.turnAngle(from:heading, to:bearing)
         let change = max(-maxChange, min(maxChange, error))
         let turned = heading + change
         heading = atan2(sin(turned), cos(turned))

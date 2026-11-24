@@ -106,7 +106,7 @@ func bakePair(_ key: String, _ from: CGImage, _ to: CGImage, approach: Int? = ni
     tile += 1
 }
 
-for name in clips.keys.sorted() where name != "pivot" {
+for name in clips.keys.sorted() where ["bed","urinate","defecate"].contains(name) {
     let clip = clips[name]!
     let url = name == "bed" ? URL(fileURLWithPath: CommandLine.arguments[1]) : folder.appendingPathComponent(clip.atlas + ".png")
     let atlas = CGImageSourceCreateImageAtIndex(CGImageSourceCreateWithURL(url as CFURL,nil)!,0,nil)!
@@ -115,9 +115,7 @@ for name in clips.keys.sorted() where name != "pivot" {
     if name == "bed" {
         edges = [(0,1),(0,2),(2,3),(0,4),(4,5),(5,6),(6,7),(7,8),(7,9),(7,10),(10,11),(0,12),(12,13),(0,14),(14,15)]
     } else {
-        let linear = ["jump", "wag", "urinate", "defecate"].contains(name)
-        let count = linear ? photos.count - 1 : photos.count
-        edges = (0..<count).map { ($0, ($0+1)%photos.count) }
+        edges = (1..<(photos.count-1)).map { ($0,$0+1) }
     }
     for (a,b) in edges {
         let approach = (name == "urinate" || name == "defecate") && a < 3 ? a : nil
@@ -213,7 +211,7 @@ func constrainTurn(_ source: Silhouette, _ target: Silhouette, tile t: Int, chan
         }
     }
 }
-let silhouettes = directions + [("wag",3,false),("wag",3,true)]
+let silhouettes = directions
 let outlines = silhouettes.map { Silhouette(pivotPose($0.name,$0.frame,$0.mirror,transparent:true)) }
 let pivots = directions.map { pivotPose($0.name, $0.frame, $0.mirror) }
 for i in pivots.indices {
@@ -223,10 +221,8 @@ for i in pivots.indices {
     constrainTurn(outlines[next],outlines[i],tile:tile-1,channel:2)
 }
 for i in [10, 14] {
-    try bakePair("pivot/\(i)/wag", pivots[i], pivotPose("wag", 3, directions[i].mirror))
-    let wag = directions[i].mirror ? 17 : 16
-    constrainTurn(outlines[i],outlines[wag],tile:tile-1,channel:0)
-    constrainTurn(outlines[wag],outlines[i],tile:tile-1,channel:2)
+    let next = pivotPose("urinate", 1, directions[i].mirror)
+    try bakePair("pivot/\(i)/break", pivots[i], next)
 }
 // A distance field blends the two outlines geometrically in a turn. Mixing
 // alpha values directly leaves a transparent second dog wherever views differ.

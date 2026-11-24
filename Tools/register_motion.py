@@ -7,42 +7,27 @@ from PIL import Image
 
 motion = Path(__file__).resolve().parents[1] / "Assets/Photo/Motion"
 
-# Each clip keeps one uniform scale. The X coordinate marks the torso (or
-# chest, for head-on views); the lowest fully visible paw defines the floor.
-# The jump moves right within its atlas, so register its torso in every cell.
-clips = {
-    "trot": ("Action", 4, 0, 0.578, 166),
-    "jump": ("Action", 4, 2, 0.578, (128, 131, 147, 171, 187, 188, 178, 166)),
-    "wag": ("Wag", 2, 0, 0.329, 230),
-    "bed": ("Bed", 3, 0, 0.482, 182),
-}
+# The bed atlas has twelve original exposures. pack_bed.swift adds four more
+# at the bottom of the texture in the application bundle.
+alpha = Image.open(motion / "Bed.png").getchannel("A")
+solid = alpha.point(lambda x: 255 if x > 38 else 0)
+frames = []
+for index in range(12):
+    row, col = divmod(index, 4)
+    x, y = col * alpha.width // 4, row * alpha.height // 3
+    right, bottom = (col + 1) * alpha.width // 4, (row + 1) * alpha.height // 3
+    l, t, r, b = solid.crop((x, y, right, bottom)).getbbox()
+    if l < 2 or t < 2 or r > right - x - 2 or b > bottom - y - 2:
+        raise ValueError(f"bed frame {index}: transparent gutter is missing")
+    frames.append([max(x,x+l-6), max(y,y+t-6), min(right,x+r+6), min(bottom,y+b+6),
+                   x+182, y+b-2])
+for i in range(4):
+    x, y = i*362, 3*362
+    frames.append([x,y,x+362,y+330,x+182,y+320])
 
-registered = {}
-for name, (atlas, rows, first_row, scale, pivot_x) in clips.items():
-    alpha = Image.open(motion / f"{atlas}.png").getchannel("A")
-    solid = alpha.point(lambda x: 255 if x > 38 else 0)
-    frames = []
-    for index in range(12 if name == "bed" else 8):
-        row, col = first_row + index // 4, index % 4
-        x, y = col * alpha.width // 4, row * alpha.height // rows
-        right, bottom = (col + 1) * alpha.width // 4, (row + 1) * alpha.height // rows
-        l, t, r, b = solid.crop((x, y, right, bottom)).getbbox()
-        if l < 2 or t < 2 or r > right - x - 2 or b > bottom - y - 2:
-            raise ValueError(f"{name} frame {index}: transparent gutter is missing")
-        # A little space for translucent fur around the opaque silhouette.
-        bounds = [max(x, x + l - 6), max(y, y + t - 6),
-                  min(right, x + r + 6), min(bottom, y + b + 6)]
-        horizontal = pivot_x if isinstance(pivot_x, int) else pivot_x[index]
-        frames.append(bounds + [x + horizontal, y + b - 2])
-    if name == "bed":
-        # pack_bed.swift adds four registered 362px cells under the original sheet.
-        for i in range(4):
-            x, y = i * 362, 3 * 362
-            frames.append([x, y, x + 362, y + 330, x + 182, y + 320])
-    registered[name] = dict(atlas=atlas, scale=scale, frames=frames)
+registered = {"bed": dict(atlas="Bed", scale=0.482, frames=frames)}
 
-# The first pose is an exact copy of wag frame 3. The two actions share
-# their standing pose. Register the near forepaw at a fixed ground point.
+# The two actions share the approach. Register the near forepaw at a fixed ground point.
 ready = [75, 544, 435, 960, 244, 952]
 sheet = Image.open(motion / "Breaks.png").getchannel("A")
 for name, cells in [("urinate", [(0, 0, 343), (1, 0, 343), (2, 0, 345)]),
@@ -54,22 +39,26 @@ for name, cells in [("urinate", [(0, 0, 343), (1, 0, 343), (2, 0, 345)]),
         alpha = sheet.crop((x, y, x + 512, y + 512))
         l, t, r, b = alpha.point(lambda v: 255 if v > 38 else 0).getbbox()
         frames.append([x+l-4, y+t-4, x+r+4, y+b+4, x+forepaw-26, y+449])
-    registered[name] = dict(atlas="Breaks", scale=registered["wag"]["scale"], frames=frames)
+    registered[name] = dict(atlas="Breaks", scale=0.329, frames=frames)
 
 # Nine poses from a single photographic turnaround. The paws are measured at
 # their pads in the source cell. Order: right fore, left fore, right hind,
 # left hind. Hidden paws share the ground rig but do not warp visible fur.
 turn_toes = [
-    [(215,382,1),(267,374,1),(175,344,1),(243,336,0)],
-    [(202,382,1),(251,373,1),(131,343,1),(173,334,0)],
-    [(230,382,1),(269,371,1),(103,348,1),(171,335,1)],
-    [(246,380,1),(275,366,1),(86,352,1),(149,337,1)],
-    [(269,368,1),(281,353,1),(62,359,1),(84,340,1)],
-    [(291,352,1),(237,342,1),(130,377,1),(85,357,1)],
-    [(281,368,1),(219,362,1),(170,400,1),(105,384,1)],
-    [(259,361,1),(179,346,0),(219,401,1),(140,392,1)],
-    [(243,358,0),(203,353,1),(241,401,1),(166,397,1)],
+    [(176,386,1),(237,387,1),(149,340,1),(234,334,0)],
+    [(183,386,1),(251,380,1),(113,339,1),(161,330,0)],
+    [(211,386,1),(267,380,1),(91,340,1),(156,338,1)],
+    [(215,384,1),(263,373,1),(74,351,1),(137,340,1)],
+    [(247,383,1),(271,366,1),(61,365,1),(99,351,1)],
+    [(283,366,1),(243,355,1),(125,384,1),(78,366,1)],
+    [(275,385,1),(217,372,1),(171,418,1),(94,402,1)],
+    [(266,379,1),(214,362,0),(202,418,1),(122,414,1)],
+    [(198,375,1),(219,362,0),(245,419,1),(154,417,1)],
 ]
+# The nose recedes behind the ears on the last three bearings. Its projected
+# position still steers the gaze continuously across those photographs.
+turn_noses = [(214,118),(266,118),(326,112),(357,113),(387,115),
+              (367,111),(327,113),(270,113),(215,110)]
 sheet = Image.open(motion / "Pivot.png").getchannel("A")
 scale = 0.344
 frames, toes = [], []
@@ -84,7 +73,15 @@ for i, contacts in enumerate(turn_toes):
     frames.append([x+left-4,y+top-4,x+right+4,y+bottom+4,x+cx,y+cy])
     toes.append([v for tx,ty,visible in contacts
                  for v in (round((tx-cx)*scale,3),round((ty-cy)*scale,3),visible)])
-registered["pivot"] = dict(atlas="Pivot", scale=scale, frames=frames, toes=toes)
+def registered_landmark(i, point):
+    x, y = (i % 3)*426, [0,400,798][i // 3]
+    return [round((x+point[0]-frames[i][4])*scale,3),
+            round((y+point[1]-frames[i][5])*scale,3)]
+
+noses = [registered_landmark(i, point) for i,point in enumerate(turn_noses)]
+tail = registered_landmark(2, (129,87)) + registered_landmark(2, (96,137))
+registered["pivot"] = dict(atlas="Pivot", scale=scale, frames=frames, toes=toes,
+                           noses=noses, tail=tail)
 
 with (motion / "Atlas.json").open("w", encoding="utf-8") as out:
     json.dump(registered, out, separators=(",", ":"), indent=1)
