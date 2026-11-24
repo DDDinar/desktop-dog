@@ -1,7 +1,8 @@
 import Foundation
 import CoreGraphics
 
-enum Pose {
+enum Pose: Equatable {
+    case bathroom(BathroomBreak)
     case stand, walk, run, jump, sniff, lie, sleep
 
     var strideLength: CGFloat {
@@ -13,7 +14,28 @@ enum Pose {
     }
 }
 
+enum BathroomBreak: CaseIterable {
+    case urinate, defecate
+
+    // Time to face the viewer and settle on all four paws before the first pose.
+    static let settle = 1.65
+    var hold: TimeInterval { self == .urinate ? 1.8 : 2.6 }
+    static let enter = 1.55
+    var duration: TimeInterval { 2 * Self.enter + hold }
+
+    /// Fractional photographic keyframe. Pause at each end of the weight transfer.
+    func keyframe(at time: TimeInterval) -> Double {
+        let stop = Self.enter + hold
+        let t = max(0, min(Self.enter, time < stop ? time : duration - time))
+        let turning = t < 0.8
+        let fraction = turning ? t / 0.8 : (t - 0.8) / (Self.enter - 0.8)
+        let eased = fraction * fraction * (3 - 2 * fraction)
+        return turning ? 3 * eased : 3 + 2 * eased
+    }
+}
+
 enum Activity {
+    case bathroom(BathroomBreak, startedAt: TimeInterval, then: BathroomBreak?)
     case stand(until: TimeInterval)
     case walk(to: CGPoint, folder: CGPoint?)
     case sniff(until: TimeInterval)
@@ -45,6 +67,9 @@ struct Dog {
     private(set) var jumpProgress: CGFloat = 0
     private(set) var jumpLift: CGFloat = 0
     private var movementSpeed: CGFloat = 0
+    private(set) var bathroomTime: TimeInterval = 0
+    private var nextBathroom: TimeInterval
+    private var breakOnLanding: BathroomBreak?
     private var nextChase: TimeInterval
     private var lastFolder: CGPoint?
     private var manualRest = false
@@ -73,6 +98,7 @@ struct Dog {
         self.position = position
         activity = .stand(until: now + 1.2)
         nextChase = now + Double.random(in: 40...75)
+        nextBathroom = now + Double.random(in: 180...420)
         joyUntil = now + 2.2
     }
 
@@ -132,6 +158,29 @@ struct Dog {
         resumeSince = nil
     }
 
+    mutating func takeBreak(_ kind: BathroomBreak, now: TimeInterval) {
+        switch activity {
+        case .jump:
+            breakOnLanding = kind
+            return
+        case let .bathroom(current, start, _):
+            if current != kind { activity = .bathroom(current, startedAt: start, then: kind) }
+            return
+        default:
+            break
+        }
+        manualRest = false
+        joyUntil = now
+        activity = .bathroom(kind, startedAt: now, then: nil)
+        nextBathroom = now + Double.random(in: 360...720)
+    }
+
+    private mutating func faceViewer(dt: TimeInterval) {
+        let side = cos(heading)
+        if abs(side) > 0.35 { viewerSide = side > 0 ? 1 : -1 }
+        turn(toward: -.pi / 2 + viewerSide * 0.62, maxChange: 2.6 * dt)
+    }
+
     mutating func pet(now: TimeInterval) {
         wake(now: now)
         activity = .stand(until: now + 3.4)
@@ -150,7 +199,7 @@ struct Dog {
         switch activity {
         case .lie, .sleep:
             if !shouldSleep { wake(now: now) }
-        case .jump:
+        case .jump, .bathroom:
             break
         default:
             if shouldSleep { activity = .lie(until: now + 8) }
@@ -160,12 +209,12 @@ struct Dog {
         switch activity {
         case let .stand(until):
             nextPose = .stand
-            let side = cos(heading)
-            if abs(side) > 0.35 { viewerSide = side > 0 ? 1 : -1 }
-            _ = turn(toward: -.pi / 2 + viewerSide * 0.62, maxChange: 2.6 * dt)
+            faceViewer(dt: dt)
             if now >= until {
                 let pointerDistance = hypot(pointer.x - position.x, pointer.y - position.y)
-                if allowChase && pointerMoving && pointerOnScreen && pointerDistance > 75 && now >= nextChase {
+                if now >= nextBathroom {
+                    takeBreak(BathroomBreak.allCases.randomElement()!, now: now)
+                } else if allowChase && pointerMoving && pointerOnScreen && pointerDistance > 75 && now >= nextChase {
                     chase(now: now, forced: false)
                 } else if Double.random(in: 0..<1) >= 0.36 || !visitFolder(folders, in: bounds, scale: scale) {
                     stroll(in: bounds)
@@ -181,6 +230,18 @@ struct Dog {
                 } else {
                     activity = .stand(until: now + Double.random(in: 1.6...5.2))
                 }
+            }
+        case let .bathroom(kind, start, following):
+            bathroomTime = max(0, now - start - BathroomBreak.settle)
+            if now < start + BathroomBreak.settle {
+                faceViewer(dt: dt)
+                nextPose = .stand
+            } else if bathroomTime < kind.duration {
+                nextPose = .bathroom(kind)
+            } else {
+                nextPose = .stand
+                activity = .stand(until: now + 1.4)
+                if let following { takeBreak(following, now: now) }
             }
         case let .sniff(until):
             nextPose = .sniff
@@ -222,6 +283,7 @@ struct Dog {
                       let jump = jumpToward(aim, over: folders, in: bounds, scale: scale,
                                             now: now, chaseUntil: until, forced: forced) {
                 face(jump.landing)
+                breakOnLanding = nil
                 activity = .jump(jump)
                 nextPose = .jump
             } else {
@@ -241,6 +303,7 @@ struct Dog {
             jumpLift = 4 * jump.height * air * (1 - air)
             if jumpProgress == 1 {
                 activity = .chase(until: jump.chaseUntil, forced: jump.forced)
+                if let kind = breakOnLanding { takeBreak(kind, now: now) }
             }
         case let .lie(until):
             nextPose = .lie
@@ -306,7 +369,7 @@ struct Dog {
             return true
         }
         let bearing = atan2(dy / Self.cameraDepth, dx)
-        let error = turn(toward: bearing, maxChange: (steering ? 8 : 2.7) * dt)
+        let error = turn(toward: bearing, maxChange: (steering ? 8 : 1.9) * dt)
         // A walk starts with a turn in place. At a run the dog follows a
         // curve, slowing into tight turns instead of running sideways.
         if !steering && abs(error) > 0.10 {

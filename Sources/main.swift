@@ -258,6 +258,8 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(item("Погулять", #selector(walk)))
             menu.addItem(item("Обнюхать папку", #selector(sniff)))
             menu.addItem(item("Догонять курсор", #selector(callDog)))
+            menu.addItem(item("Пописать", #selector(urinate)))
+            menu.addItem(item("Покакать", #selector(defecate)))
             switch dog?.activity {
             case .lie?, .sleep?: menu.addItem(item("Разбудить", #selector(wakeDog)))
             default: menu.addItem(item("Уложить спать", #selector(restDog)))
@@ -351,6 +353,16 @@ final class DesktopDog: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         folderRequest = true
         refreshFolders()
+    }
+
+    @objc private func urinate() { takeBreak(.urinate) }
+    @objc private func defecate() { takeBreak(.defecate) }
+
+    private func takeBreak(_ kind: BathroomBreak) {
+        reveal()
+        activeUntil = now + 20
+        folderRequest = false
+        dog.takeBreak(kind, now: now)
     }
 
     @objc private func callDog() {

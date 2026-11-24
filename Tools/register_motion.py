@@ -61,6 +61,26 @@ for row, (name, scale) in enumerate([("frontTilt", .39), ("nearSide", .46),
         frames.append(bounds + [x+(left+right)//2, y+bottom-2])
     registered[name] = dict(atlas="TurnViews", scale=scale, frames=frames)
 
+# The first pose is an exact copy of wag frame 3. The two actions share
+# their standing pose. Register the near forepaw at a fixed ground point.
+ready = [75, 544, 435, 960, 244, 952]
+sheet = Image.open(motion / "Breaks.png").getchannel("A")
+for name, cells in [("urinate", [(0, 0, 343), (1, 0, 343), (2, 0, 345)]),
+                    ("defecate", [(0, 0, 343), (1, 1, 345), (2, 1, 345)])]:
+    frames = [ready, [87, 1099, 424, 1490, 251, 1485],
+              [583, 1114, 953, 1490, 786, 1485]]
+    for col, row, forepaw in cells:
+        x, y = col * 512, row * 512
+        alpha = sheet.crop((x, y, x + 512, y + 512))
+        l, t, r, b = alpha.point(lambda v: 255 if v > 38 else 0).getbbox()
+        frames.append([x+l-4, y+t-4, x+r+4, y+b+4, x+forepaw-26, y+449])
+    registered[name] = dict(atlas="Breaks", scale=registered["wag"]["scale"], frames=frames)
+
+# Balanced support poses shared by the turn solver and the optical-flow baker.
+for name, frame in dict(side=4, rearSide=1, far=3, backTilt=2, back=2, frontTilt=2,
+                        near=0, nearSide=3, front=2, wag=3, trot=6).items():
+    registered[name]["pivotFrame"] = frame
+
 with (motion / "Atlas.json").open("w", encoding="utf-8") as out:
     json.dump(registered, out, separators=(",", ":"), indent=1)
     out.write("\n")

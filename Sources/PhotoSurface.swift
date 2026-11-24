@@ -121,6 +121,7 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
     }
 
     func updateBed(_ sample: BedLife.Sample) {
+        animation.resetContacts()
         display(animation.bedFrame(sample))
     }
 
@@ -187,6 +188,9 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
              SIMD4(pose.scale,pose.fraction,Float(pose.tile),pose.reversed ? 1 : 0),
              pose.bounds,pose.targetBounds]
         }
+        func contactParameters(_ pose: PhotoFrame) -> [SIMD4<Float>] {
+            [pose.pawVisibility] + pose.pawPins
+        }
         var b = bounds(frame)
         var uniforms = parameters(frame)
         if let turn = currentTurn, let second = atlases[turn.target.atlas] {
@@ -194,20 +198,27 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
             let secondBounds = bounds(turn.target, interpolated: true)
             b = union(b, bounds(turn.target))
             uniforms += parameters(turn.target)
-            uniforms += [SIMD4(0,0,0,turn.amount),
-                         SIMD4(frame.mirror,turn.target.mirror,0,0), firstBounds, secondBounds,
+            uniforms += [SIMD4(Float(turn.angularTile ?? 0),turn.angularTile == nil ? 0 : turn.angularWeight,0,turn.amount),
+                         SIMD4(frame.mirror,turn.target.mirror,Float(turn.outlines.x),Float(turn.outlines.y)), firstBounds, secondBounds,
                          SIMD4(frame.nose.x*frame.mirror,frame.nose.y,turn.target.nose.x*turn.target.mirror,turn.target.nose.y)]
+            var firstContacts = contactParameters(frame)
+            // Reserve a fixed slot for the second view even without constraints.
+            if firstContacts.count == 1 { firstContacts += Array(repeating:.zero,count:4) }
+            uniforms += firstContacts + contactParameters(turn.target)
             encoder.setRenderPipelineState(turnPipeline)
             encoder.setFragmentTexture(second.texture,index:2)
         } else {
+            uniforms += [SIMD4(frame.mirror,0,0,0)] + contactParameters(frame)
             encoder.setRenderPipelineState(pipeline)
+        }
+        for pin in frame.pawPins {
+            b = union(b,SIMD4(pin.z-9,pin.w-9,pin.z+9,pin.w+9))
         }
         let half = SIMD2(Float(DogWindow.size.width / 2), Float(DogWindow.size.height / 2))
         let floor = Float(DogWindow.groundMargin) - half.y + frame.lift
         let corners = [SIMD2(b.x-2,b.y-2), SIMD2(b.z+2,b.y-2), SIMD2(b.x-2,b.w+2), SIMD2(b.z+2,b.w+2)]
-        let samplingMirror = currentTurn != nil ? Float(1) : frame.mirror
         let vertices = corners.map { p in
-            SIMD4(p.x/half.x, (floor-p.y)/half.y, p.x*samplingMirror, p.y)
+            SIMD4(p.x/half.x, (floor-p.y)/half.y, p.x, p.y)
         }
         encoder.setFragmentTexture(atlas.texture, index: 0)
         encoder.setFragmentTexture(flow, index: 1)
@@ -264,9 +275,40 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
         float wb = weight/(1+(1-t)*errorB);
         return (wa*first+wb*second)/(wa+wb);
     }
+    float2 plant(float2 p, float4 visible, thread float4 *pins) {
+        if (!any(visible > 0.0) || p.y < -80) return p;
+        // Integrate small inverse displacements. A single large inverse offset
+        // folds a shin over itself when the two photographs have different strides.
+        for (int step=0;step<8;step++) {
+            float phase = 1.0-float(step)/8.0;
+            float2 sum = 0;
+            float total = 0, envelope = 0;
+            for (int i=0; i<4; ++i) {
+                if (visible[i] <= 0) continue;
+                float4 pin = pins[i];
+                float2 d = p - mix(pin.xy,pin.zw,phase);
+                d.y *= d.y < 0 ? 0.68 : 1.05;
+                float r2 = dot(d,d);
+                float reach = 1-smoothstep(25.0,1156.0,r2);
+                float inverse = 1.0/max(2.0,r2);
+                float w = visible[i]*reach*inverse*inverse;
+                total += w;
+                sum += w*(pin.xy-pin.zw);
+                envelope = max(envelope,visible[i]*reach);
+            }
+            p += 0.125*envelope*sum/max(total,1.0e-12);
+        }
+        return p;
+    }
     fragment float4 photo_fragment(PhotoPixel p [[stage_in]], texture2d<float> atlas [[texture(0)]],
                                    texture2d<float> flow [[texture(1)]], constant float4 *u [[buffer(0)]]) {
-        return gait(p.uv,max(length(dfdx(p.uv)),length(dfdy(p.uv))),atlas,flow,u);
+        float2 pos = p.uv;
+        if (any(u[5]>0.0) && pos.y > -80) {
+            float4 pins[4];
+            for (int i=0;i<4;i++) pins[i]=u[6+i];
+            pos = plant(pos,u[5],pins);
+        }
+        return gait(pos*float2(u[4].x,1),max(length(dfdx(p.uv)),length(dfdy(p.uv))),atlas,flow,u);
     }
     float mapInterval(float v,float lo,float hi,float a,float b) {
         return a+(v-lo)*(b-a)/max(hi-lo,0.4);
@@ -274,6 +316,37 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
     float remap(float v,float3 mid,float3 dest) {
         return v < mid.y ? mapInterval(v,mid.x,mid.y,dest.x,dest.y)
                          : mapInterval(v,mid.y,mid.z,dest.y,dest.z);
+    }
+    float2 turnPosition(float2 p, float3 mx, float3 my, float3 x, float3 y,
+                        float t, float opticalWeight, int tile, bool reverse,
+                        texture2d<float> flow, constant float4 *registration) {
+        float4 visible = registration[0];
+        if (any(visible > 0.0) && p.y > -80) {
+            float4 pins[4];
+            for (int i=0;i<4;i++) {
+                pins[i]=registration[i+1];
+                float2 raw=pins[i].xy;
+                float2 middle=float2(remap(raw.x,x,mx),remap(raw.y,y,my));
+                if (opticalWeight > 0) {
+                    float2 tracked=raw+t*displacement(flow,raw,tile,reverse);
+                    middle=mix(middle,tracked,opticalWeight);
+                }
+                pins[i].xy=middle;
+            }
+            p=plant(p,visible,pins);
+        }
+        float2 geometric=float2(remap(p.x,mx,x),remap(p.y,my,y));
+        if (opticalWeight <= 0) return geometric;
+        float2 sample=geometric;
+        for (int i=0;i<4;i++) sample=mix(sample,p-t*displacement(flow,sample,tile,reverse),0.72);
+        return mix(geometric,sample,opticalWeight);
+    }
+    float outlineDistance(texture2d<float> atlas, float2 pos, int component) {
+        constexpr sampler linear(coord::pixel,address::clamp_to_edge,filter::linear);
+        int tile=component/4;
+        float2 uv=clamp((pos+float2(108,172))*0.5,float2(0.5),float2(107.5,99.5));
+        float4 values=atlas.sample(linear,uv+float2((tile%8)*108,(tile/8)*100));
+        return (values[component%4]*255.0-128.0)*0.25;
     }
     fragment float4 turn_fragment(PhotoPixel p [[stage_in]], texture2d<float> first [[texture(0)]],
             texture2d<float> stride [[texture(1)]], texture2d<float> second [[texture(2)]],
@@ -285,11 +358,21 @@ final class PhotoSurface: MTKView, MTKViewDelegate {
         float3 ay=float3(h.y,clamp(n.y,h.y+3,h.w-3),h.w);
         float3 by=float3(k.y,clamp(n.w,k.y+3,k.w-3),k.w);
         float3 mx=mix(ax,bx,t), my=mix(ay,by,t);
-        float2 a=float2(remap(p.uv.x,mx,ax),remap(p.uv.y,my,ay));
-        float2 b=float2(remap(p.uv.x,mx,bx),remap(p.uv.y,my,by));
+        float2 a=turnPosition(p.uv,mx,my,ax,ay,t,u[8].y,int(u[8].x),false,stride,u+13);
+        float2 b=turnPosition(p.uv,mx,my,bx,by,1-t,u[8].y,int(u[8].x),true,stride,u+18);
         float4 A = gait(a*float2(u[9].x,1),width,first,stride,u);
         float4 B = gait(b*float2(u[9].y,1),width,second,stride,u+4);
-        return mix(A,B,smoothstep(0.12,0.88,t));
+        float w=smoothstep(0.12,0.88,t);
+        float4 color=mix(A,B,w);
+        if (u[8].y>0 && u[9].z>=0 && u[9].w>=0 && w>0 && w<1 && color.a>0.001) {
+            float edge=mix(outlineDistance(stride,a,int(u[9].z)),
+                           outlineDistance(stride,b,int(u[9].w)),w);
+            float aa=max(0.65,width*0.75);
+            float weight=u[8].y*smoothstep(0.0,0.17,min(w,1-w));
+            float alpha=mix(color.a,smoothstep(-aa,aa,edge),weight);
+            color*=alpha/color.a;
+        }
+        return color;
     }
     """
 }
